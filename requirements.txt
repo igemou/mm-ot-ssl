@@ -1,0 +1,7 @@
+torch
+torchvision
+transformers
+timm
+pycocotools
+Pillow
+numpy
