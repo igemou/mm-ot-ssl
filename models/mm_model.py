@@ -73,7 +73,7 @@ class MultiModalModel(nn.Module):
             out["mask"] = mask
 
             # MAE reconstruction
-            pred = self.mae_decoder(z_visible)
+            pred = self.mae_decoder(z_visible, ids_restore)
             out["pred_patches"] = pred
             out["target_patches"] = patches
 
