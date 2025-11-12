@@ -64,10 +64,10 @@ def cleanup():
 def get_loader(batch_size: int = 32, ddp: bool = False):
     dataset = None
     sampler = DistributedSampler(dataset) if ddp else None
-    samplers = [sampler] if dist else []
+    s = [sampler] if sampler is not None else []
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=(sampler is None), sampler=sampler)
-    return loader, *samplers
+    return loader, *[s]
 
 def main(args):
     model = None
