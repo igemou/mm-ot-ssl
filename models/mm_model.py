@@ -4,8 +4,8 @@ import torch.nn as nn
 from vision_encoder import VisionEncoder
 from text_encoder import TextEncoder
 from projector import MLPProjector
-from models.mae_decoder import MAEDecoder
-from utils.mae_utils import patchify, random_masking
+from models.mae_decoder import MAEDecoder, PretrainedMAEDecoder
+from utils.mae import patchify, random_masking
 
 class MultiModalModel(nn.Module):
     """
@@ -38,7 +38,8 @@ class MultiModalModel(nn.Module):
         self.text_proj = MLPProjector(self.text_encoder.hidden_size, shared_dim)
 
         # MAE decoder 
-        self.mae_decoder = MAEDecoder(embed_dim=self.vision_encoder.out_dim, patch_size=patch_size)
+        # self.mae_decoder = MAEDecoder(embed_dim=self.vision_encoder.out_dim, patch_size=patch_size)
+        self.mae_decoder = PretrainedMAEDecoder()
         self.patch_size = patch_size
 
     @torch.no_grad()
@@ -73,7 +74,7 @@ class MultiModalModel(nn.Module):
             out["mask"] = mask
 
             # MAE reconstruction
-            pred = self.mae_decoder(z_visible)
+            pred = self.mae_decoder(z_visible, ids_restore)
             out["pred_patches"] = pred
             out["target_patches"] = patches
 
