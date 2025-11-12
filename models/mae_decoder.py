@@ -28,7 +28,7 @@ from utils.mae import patchify, unpatchify, random_masking
 
 from transformers import ViTMAEForPreTraining
 
-class PretrainMAEDecoder(nn.module):
+class PretrainMAEDecoder(nn.Module):
     def __init__(self):
         model = ViTMAEForPreTraining.from_pretrained('facebook/vit-mae-large')
         self.decoder = model.decoder
