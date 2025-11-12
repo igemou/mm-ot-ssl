@@ -5,7 +5,7 @@ from vision_encoder import VisionEncoder
 from text_encoder import TextEncoder
 from projector import MLPProjector
 from models.mae_decoder import MAEDecoder
-from utils.mae_utils import patchify, random_masking
+from utils.mae import patchify, random_masking
 
 class MultiModalModel(nn.Module):
     """
