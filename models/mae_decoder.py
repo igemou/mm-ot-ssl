@@ -20,7 +20,7 @@ from functools import partial
 import torch
 import torch.nn as nn
 
-from timm.models.vision_transformer import PatchEmbed, Block
+from timm.models.vision_transformer import Block
 from timm.layers import trunc_normal_
 
 from utils.pos_embed import get_2d_sincos_pos_embed
@@ -28,7 +28,7 @@ from utils.mae import patchify, unpatchify, random_masking
 
 from transformers import ViTMAEForPreTraining
 
-class PretrainMAEDecoder(nn.Module):
+class PretrainedMAEDecoder(nn.Module):
     def __init__(self):
         model = ViTMAEForPreTraining.from_pretrained('facebook/vit-mae-base')
         self.decoder = model.decoder
@@ -40,20 +40,13 @@ class PretrainMAEDecoder(nn.Module):
 class MAEDecoder(nn.Module):
     """ Masked Autoencoder with VisionTransformer backbone
     """
-    def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=1024, 
+    def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768, 
                  decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
-                 mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False):
+                 mlp_ratio=4., norm_layer=nn.LayerNorm):
         super().__init__()
 
         # --------------------------------------------------------------------------
-        # MAE encoder specifics
-        self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
-        num_patches = self.patch_embed.num_patches
-
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim), requires_grad=False)  # fixed sin-cos embedding
-
-        # --------------------------------------------------------------------------
+        self.self.num_patches = (img_size // patch_size) ** 2 #assuming square image
 
         # --------------------------------------------------------------------------
         # MAE decoder specifics
@@ -61,7 +54,7 @@ class MAEDecoder(nn.Module):
 
         self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
 
-        self.decoder_pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, decoder_embed_dim), requires_grad=False)  # fixed sin-cos embedding
+        self.decoder_pos_embed = nn.Parameter(torch.zeros(1, self.num_patches + 1, decoder_embed_dim), requires_grad=False)  # fixed sin-cos embedding
 
         self.decoder_blocks = nn.ModuleList([
             Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
@@ -71,22 +64,12 @@ class MAEDecoder(nn.Module):
         self.decoder_pred = nn.Linear(decoder_embed_dim, patch_size**2 * in_chans, bias=True) # decoder to patch
         # --------------------------------------------------------------------------
 
-        self.norm_pix_loss = norm_pix_loss
-
         self.initialize_weights()
 
     def initialize_weights(self):
         # initialization
-        # initialize (and freeze) pos_embed by sin-cos embedding
-        pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), cls_token=True)
-        self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
-
-        decoder_pos_embed = get_2d_sincos_pos_embed(self.decoder_pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), cls_token=True)
+        decoder_pos_embed = get_2d_sincos_pos_embed(self.decoder_pos_embed.shape[-1], int(self.self.num_patches**.5), cls_token=True)
         self.decoder_pos_embed.data.copy_(torch.from_numpy(decoder_pos_embed).float().unsqueeze(0))
-
-        # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
-        w = self.patch_embed.proj.weight.data
-        torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
 
         # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
         torch.nn.init.normal_(self.cls_token, std=.02)
