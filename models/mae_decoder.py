@@ -30,7 +30,7 @@ from transformers import ViTMAEForPreTraining
 
 class PretrainMAEDecoder(nn.Module):
     def __init__(self):
-        model = ViTMAEForPreTraining.from_pretrained('facebook/vit-mae-large')
+        model = ViTMAEForPreTraining.from_pretrained('facebook/vit-mae-base')
         self.decoder = model.decoder
     
     def forward(self, x, ids_restore):
