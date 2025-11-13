@@ -1,2 +1,163 @@
-# TODO: Add pretraining pipeline after fixing MAE decoder and its utilities
-# And make they are integrated in mm_model
+import os
+import torch
+import argparse
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+from models.mm_model import MultiModalModel
+from data.coco_dataset import COCOMultiModalDataset
+from utils.losses import clip_contrastive_loss, sinkhorn_ot_loss, mlm_loss, MAE_loss
+from utils.metrics import retrieval_accuracy
+
+
+class Trainer:
+    def __init__(self, args):
+        self.args = args
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        self.model = MultiModalModel(
+            vision_name=args.vision_name,
+            text_name=args.text_name,
+            shared_dim=args.shared_dim,
+        ).to(self.device)
+
+        self.opt = torch.optim.AdamW(self.model.parameters(), lr=args.lr, weight_decay=1e-4)
+        self.mlm_loss_fn = mlm_loss(model_name=args.text_name)
+        self.mae_loss_fn = MAE_loss()
+
+        self._build_datasets()
+        os.makedirs(args.save_dir, exist_ok=True)
+
+    def _build_datasets(self):
+        self.train_loaders = {
+            "paired": DataLoader(
+                COCOMultiModalDataset(self.args.root, self.args.ann, split="paired", paired_fraction=self.args.paired_fraction),
+                batch_size=self.args.batch_size, shuffle=True, num_workers=4, drop_last=True),
+            "unpaired": DataLoader(
+                COCOMultiModalDataset(self.args.root, self.args.ann, split="unpaired"),
+                batch_size=self.args.batch_size, shuffle=True, num_workers=4, drop_last=True),
+            "text_only": DataLoader(
+                COCOMultiModalDataset(self.args.root, self.args.ann, split="text_only"),
+                batch_size=self.args.batch_size, shuffle=True, num_workers=4, drop_last=True),
+            "image_only": DataLoader(
+                COCOMultiModalDataset(self.args.root, self.args.ann, split="image_only"),
+                batch_size=self.args.batch_size, shuffle=True, num_workers=4, drop_last=True),
+        }
+
+        self.val_loader = DataLoader(
+            COCOMultiModalDataset(self.args.val_root, self.args.val_ann, split="paired"),
+            batch_size=self.args.batch_size, shuffle=False, num_workers=4,
+        )
+
+        self.iters = {k: iter(v) for k, v in self.train_loaders.items()}
+
+    def _next(self, name):
+        try:
+            return next(self.iters[name])
+        except StopIteration:
+            self.iters[name] = iter(self.train_loaders[name])
+            return next(self.iters[name])
+
+    def train(self):
+        print(f"Starting pretraining for {self.args.epochs} epochs on {self.device}")
+        λ = {
+            "clip": self.args.lambda_clip,
+            "ot": self.args.lambda_ot,
+            "mlm": self.args.lambda_mlm,
+            "mae": self.args.lambda_mae,
+        }
+
+        for epoch in range(1, self.args.epochs + 1):
+            self.model.train()
+            epoch_losses = {"clip": 0, "ot": 0, "mlm": 0, "mae": 0}
+            steps = len(self.train_loaders["paired"])
+
+            for step in tqdm(range(steps), desc=f"Epoch {epoch}"):
+                self.opt.zero_grad(set_to_none=True)
+                total_loss = 0.0
+
+                b = self._next("paired")
+                out = self.model(images=b["image"].to(self.device),
+                                 input_ids=b["input_ids"].to(self.device),
+                                 attention_mask=b["attention_mask"].to(self.device))
+                loss_clip = clip_contrastive_loss(out["z_img"], out["z_txt"])
+                total_loss += λ["clip"] * loss_clip
+                epoch_losses["clip"] += loss_clip.item()
+
+                b = self._next("unpaired")
+                out = self.model(images=b["image"].to(self.device),
+                                 input_ids=b["input_ids"].to(self.device),
+                                 attention_mask=b["attention_mask"].to(self.device))
+                loss_ot = sinkhorn_ot_loss(out["z_img"], out["z_txt"])
+                total_loss += λ["ot"] * loss_ot
+                epoch_losses["ot"] += loss_ot.item()
+
+                b = self._next("text_only")
+                loss_mlm = self.mlm_loss_fn(
+                    input_ids=b["input_ids"].to(self.device),
+                    attention_mask=b["attention_mask"].to(self.device),
+                    labels=b["input_ids"].to(self.device),
+                )
+                total_loss += λ["mlm"] * loss_mlm
+                epoch_losses["mlm"] += loss_mlm.item()
+
+                b = self._next("image_only")
+                out = self.model(images=b["image"].to(self.device))
+                loss_mae = self.mae_loss_fn(out["pred_patches"], out["target_patches"], out["mask"])
+                total_loss += λ["mae"] * loss_mae
+                epoch_losses["mae"] += loss_mae.item()
+
+                total_loss.backward()
+                self.opt.step()
+
+            avg = {k: v / steps for k, v in epoch_losses.items()}
+            print(f"Epoch {epoch} | Losses: {avg}")
+
+            torch.save(self.model.state_dict(), os.path.join(self.args.save_dir, f"epoch_{epoch}.pt"))
+
+            if epoch % self.args.eval_every == 0:
+                self.evaluate(epoch)
+
+    def evaluate(self, epoch):
+        self.model.eval()
+        imgs, txts = [], []
+        with torch.no_grad():
+            for batch in self.val_loader:
+                z_img = self.model.image_embed(batch["image"].to(self.device))
+                z_txt = self.model.text_embed(batch["input_ids"].to(self.device),
+                                              batch["attention_mask"].to(self.device))
+                imgs.append(z_img)
+                txts.append(z_txt)
+        z_img = torch.cat(imgs)
+        z_txt = torch.cat(txts)
+        metrics = retrieval_accuracy(z_img, z_txt)
+        print(f"[Epoch {epoch}] Validation retrieval: {metrics}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Anchored MultiModal SSL Pretraining")
+
+    parser.add_argument("--root", type=str, default="data/train2017")
+    parser.add_argument("--ann", type=str, default="data/annotations/captions_train2017.json")
+    parser.add_argument("--val_root", type=str, default="data/val2017")
+    parser.add_argument("--val_ann", type=str, default="data/annotations/captions_val2017.json")
+
+    parser.add_argument("--vision_name", type=str, default="vit_base_patch16_224")
+    parser.add_argument("--text_name", type=str, default="bert-base-uncased")
+    parser.add_argument("--shared_dim", type=int, default=256)
+
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--paired_fraction", type=float, default=0.2)
+    parser.add_argument("--eval_every", type=int, default=1)
+    parser.add_argument("--save_dir", type=str, default="checkpoints")
+
+    parser.add_argument("--lambda_clip", type=float, default=1.0)
+    parser.add_argument("--lambda_ot", type=float, default=0.5)
+    parser.add_argument("--lambda_mlm", type=float, default=1.0)
+    parser.add_argument("--lambda_mae", type=float, default=1.0)
+
+    args = parser.parse_args()
+    trainer = Trainer(args)
+    trainer.train()

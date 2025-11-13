@@ -1,12 +1,8 @@
-
-import os
-import random
-from PIL import Image
+from datasets import load_dataset
 from torch.utils.data import Dataset
 from torchvision import transforms
 from transformers import AutoTokenizer
-from pycocotools.coco import COCO
-
+import random
 
 class COCOMultiModalDataset(Dataset):
     """
@@ -19,9 +15,8 @@ class COCOMultiModalDataset(Dataset):
 
     def __init__(
         self,
-        root,
-        captions_file,
-        split="paired",
+        split="train",
+        mode="paired",
         tokenizer_name="bert-base-uncased",
         image_size=224,
         max_length=32,
@@ -29,18 +24,24 @@ class COCOMultiModalDataset(Dataset):
         seed=42,
     ):
         super().__init__()
-        self.coco = COCO(captions_file)
-        self.root = root
-        self.split = split
+        self.mode = mode
         self.paired_fraction = paired_fraction
-        self.seed = seed
-
-        self.image_ids = sorted(list(self.coco.imgs.keys()))
-        self.ann_ids = sorted(list(self.coco.anns.keys()))
         random.seed(seed)
+        
+        self.dataset = load_dataset("shunk031/MSCOCO", year=2014, coco_task="captions")["train"]
+        n_total = len(self.dataset)
+        n_paired = int(n_total * paired_fraction)
+
+        # Splits for SSL setup
+        indices = list(range(n_total))
+        random.shuffle(indices)
+        self.paired_idx = indices[:n_paired]
+        self.unpaired_idx = indices[n_paired:]
+        half = len(self.unpaired_idx) // 2
+        self.unpaired_A = self.unpaired_idx[:half]
+        self.unpaired_B = self.unpaired_idx[half:]
 
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-
         self.transform = transforms.Compose([
             transforms.Resize((image_size, image_size)),
             transforms.ToTensor(),
@@ -48,48 +49,19 @@ class COCOMultiModalDataset(Dataset):
                                  std=[0.229, 0.224, 0.225]),
         ])
 
-        n_total = len(self.image_ids)
-        n_paired = int(n_total * paired_fraction)
-        shuffled = self.image_ids.copy()
-        random.shuffle(shuffled)
-
-        self.paired_ids = shuffled[:n_paired]
-        self.unpaired_img_ids = shuffled[n_paired:]
-        half = len(self.unpaired_img_ids) // 2
-        self.unpaired_img_A = self.unpaired_img_ids[:half]
-        self.unpaired_img_B = self.unpaired_img_ids[half:]
-
     def __len__(self):
-        if self.split == "paired":
-            return len(self.paired_ids)
-        elif self.split == "unpaired":
-            return min(len(self.unpaired_img_A), len(self.unpaired_img_B))
-        elif self.split == "image_only":
-            return len(self.image_ids)
-        elif self.split == "text_only":
-            return len(self.ann_ids)
+        if self.mode == "paired":
+            return len(self.paired_idx)
+        elif self.mode == "unpaired":
+            return min(len(self.unpaired_A), len(self.unpaired_B))
+        elif self.mode == "image_only":
+            return len(self.dataset)
+        elif self.mode == "text_only":
+            return len(self.dataset)
         else:
-            raise ValueError(f"Unknown split: {self.split}")
+            raise ValueError(f"Unknown mode: {self.mode}")
 
-    def __getitem__(self, idx):
-        if self.split == "paired":
-            return self._get_paired(idx)
-        elif self.split == "unpaired":
-            return self._get_unpaired(idx)
-        elif self.split == "image_only":
-            return self._get_image_only(idx)
-        elif self.split == "text_only":
-            return self._get_text_only(idx)
-        else:
-            raise ValueError(f"Unknown split: {self.split}")
-
-    def _load_image(self, img_id):
-        img_info = self.coco.loadImgs(img_id)[0]
-        path = os.path.join(self.root, img_info["file_name"])
-        image = Image.open(path).convert("RGB")
-        return self.transform(image)
-
-    def _tokenize_caption(self, caption):
+    def _tokenize(self, caption):
         t = self.tokenizer(
             caption,
             padding="max_length",
@@ -99,33 +71,26 @@ class COCOMultiModalDataset(Dataset):
         )
         return t["input_ids"].squeeze(0), t["attention_mask"].squeeze(0)
 
-    def _get_paired(self, idx):
-        img_id = self.paired_ids[idx]
-        ann_ids = self.coco.getAnnIds(imgIds=img_id)
-        caption = self.coco.loadAnns(random.choice(ann_ids))[0]["caption"]
+    def __getitem__(self, idx):
+        if self.mode == "paired":
+            ex = self.dataset[self.paired_idx[idx]]
+            image = self.transform(ex["image"])
+            ids, mask = self._tokenize(ex["caption"])
+            return {"image": image, "input_ids": ids, "attention_mask": mask}
 
-        image = self._load_image(img_id)
-        ids, mask = self._tokenize_caption(caption)
-        return {"image": image, "input_ids": ids, "attention_mask": mask}
+        elif self.mode == "unpaired":
+            img_ex = self.dataset[self.unpaired_A[idx]]
+            txt_ex = self.dataset[self.unpaired_B[idx]]
+            image = self.transform(img_ex["image"])
+            ids, mask = self._tokenize(txt_ex["caption"])
+            return {"image": image, "input_ids": ids, "attention_mask": mask}
 
-    def _get_unpaired(self, idx):
-        # mismatched image-caption pairs from disjoint halves
-        img_id = self.unpaired_img_A[idx]
-        txt_img_id = self.unpaired_img_B[idx]
-        ann_ids = self.coco.getAnnIds(imgIds=txt_img_id)
-        caption = self.coco.loadAnns(random.choice(ann_ids))[0]["caption"]
+        elif self.mode == "image_only":
+            ex = self.dataset[idx]
+            image = self.transform(ex["image"])
+            return {"image": image}
 
-        image = self._load_image(img_id)
-        ids, mask = self._tokenize_caption(caption)
-        return {"image": image, "input_ids": ids, "attention_mask": mask}
-
-    def _get_image_only(self, idx):
-        img_id = self.image_ids[idx]
-        image = self._load_image(img_id)
-        return {"image": image}
-
-    def _get_text_only(self, idx):
-        ann_id = self.ann_ids[idx % len(self.ann_ids)]
-        caption = self.coco.loadAnns(ann_id)[0]["caption"]
-        ids, mask = self._tokenize_caption(caption)
-        return {"input_ids": ids, "attention_mask": mask}
+        elif self.mode == "text_only":
+            ex = self.dataset[idx]
+            ids, mask = self._tokenize(ex["caption"])
+            return {"input_ids": ids, "attention_mask": mask}
