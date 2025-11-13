@@ -4,7 +4,6 @@ from torchvision import transforms
 from transformers import AutoTokenizer
 import random
 
-
 class FlickrMultiModalDataset(Dataset):
     """
     Flickr30k multimodal dataset for SSL.
@@ -22,18 +21,32 @@ class FlickrMultiModalDataset(Dataset):
         max_length=32,
         paired_fraction=0.2,
         seed=42,
+        train=True,
+        val_ratio=0.1,
     ):
         super().__init__()
         self.mode = split
         self.paired_fraction = paired_fraction
         random.seed(seed)
 
-        # Flickr30k only has one split on HF ("test")
-        self.dataset = load_dataset("nlphuji/flickr30k", split="test")
+        # Load the single available split
+        full_dataset = load_dataset("nlphuji/flickr30k", split="test")
 
+        # Manual 90/10 train/val split
+        n_total = len(full_dataset)
+        n_val = int(n_total * val_ratio)
+        indices = list(range(n_total))
+        random.shuffle(indices)
+        if train:
+            indices = indices[n_val:]
+        else:
+            indices = indices[:n_val]
+
+        self.dataset = full_dataset.select(indices)
+
+        # Create paired/unpaired index partitions
         n_total = len(self.dataset)
         n_paired = int(n_total * paired_fraction)
-
         indices = list(range(n_total))
         random.shuffle(indices)
         self.paired_idx = indices[:n_paired]
