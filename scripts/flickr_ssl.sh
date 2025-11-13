@@ -19,7 +19,7 @@ export TORCH_HOME=$HF_HOME
 
 # Run training
 python train.py \
-    --epochs 1 \
+    --epochs 10 \
     --batch_size 16 \
     --lr 1e-4 \
     --eval_every 1 \
@@ -28,6 +28,8 @@ python train.py \
     --lambda_clip 1.0 \
     --lambda_ot 0.5 \
     --lambda_mlm 1.0 \
-    --lambda_mae 1.0
+    --lambda_mae 1.0 \
+    --use_anchored_ot \
+    --alpha_anchor 0.1
 
 echo "=== Done! Check logs/flickr_ssl_${SLURM_JOB_ID}.out ==="
