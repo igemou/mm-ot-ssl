@@ -29,10 +29,15 @@ from utils.mae import patchify, unpatchify, random_masking
 from transformers import ViTMAEForPreTraining
 
 class PretrainedMAEDecoder(nn.Module):
-    def __init__(self, model_str='facebook/vit-mae-base'):
+    """
+    Wrapper around Hugging Face pretrained ViT-MAE model.
+    Only keeps the decoder for reconstruction during MAE training.
+    """
+    def __init__(self, model_str: str = "facebook/vit-mae-base"):
+        super().__init__() # call before assigning submodules
         model = ViTMAEForPreTraining.from_pretrained(model_str)
-        self.decoder = model.decoder
-    
+        self.decoder = model.decoder 
+
     def forward(self, x, ids_restore):
         return self.decoder(x, ids_restore)
 

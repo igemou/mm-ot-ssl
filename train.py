@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from models.mm_model import MultiModalModel
-from data.coco_dataset import COCOMultiModalDataset
+from data.flickr_dataset import FlickrMultiModalDataset
 from utils.losses import clip_contrastive_loss, sinkhorn_ot_loss, mlm_loss, MAE_loss
 from utils.metrics import retrieval_accuracy
 
@@ -25,33 +25,30 @@ class Trainer:
         self.mlm_loss_fn = mlm_loss(model_name=args.text_name)
         self.mae_loss_fn = MAE_loss()
 
-        self._build_datasets()
+        self._build_flickr_datasets()
         os.makedirs(args.save_dir, exist_ok=True)
 
-    def _build_datasets(self):
+    def _build_flickr_datasets(self):
+        """Use Flickr30k split into paired/unpaired/image/text modes."""
         self.train_loaders = {
-            "paired": DataLoader(
-                COCOMultiModalDataset(self.args.root, self.args.ann, split="paired", paired_fraction=self.args.paired_fraction),
-                batch_size=self.args.batch_size, shuffle=True, num_workers=4, drop_last=True),
-            "unpaired": DataLoader(
-                COCOMultiModalDataset(self.args.root, self.args.ann, split="unpaired"),
-                batch_size=self.args.batch_size, shuffle=True, num_workers=4, drop_last=True),
-            "text_only": DataLoader(
-                COCOMultiModalDataset(self.args.root, self.args.ann, split="text_only"),
-                batch_size=self.args.batch_size, shuffle=True, num_workers=4, drop_last=True),
-            "image_only": DataLoader(
-                COCOMultiModalDataset(self.args.root, self.args.ann, split="image_only"),
-                batch_size=self.args.batch_size, shuffle=True, num_workers=4, drop_last=True),
+            mode: DataLoader(
+                FlickrMultiModalDataset(split=mode, paired_fraction=self.args.paired_fraction),
+                batch_size=self.args.batch_size, shuffle=True, num_workers=4, drop_last=True
+            )
+            for mode in ["paired", "unpaired", "text_only", "image_only"]
         }
 
+        # Validation = same structure, can just reuse paired samples for now
         self.val_loader = DataLoader(
-            COCOMultiModalDataset(self.args.val_root, self.args.val_ann, split="paired"),
-            batch_size=self.args.batch_size, shuffle=False, num_workers=4,
+            FlickrMultiModalDataset(split="paired", paired_fraction=0.1),
+            batch_size=self.args.batch_size, shuffle=False, num_workers=4
         )
 
+        # Create persistent iterators for each loader
         self.iters = {k: iter(v) for k, v in self.train_loaders.items()}
 
     def _next(self, name):
+        """Safe next() with automatic iterator reset."""
         try:
             return next(self.iters[name])
         except StopIteration:
@@ -69,29 +66,36 @@ class Trainer:
 
         for epoch in range(1, self.args.epochs + 1):
             self.model.train()
-            epoch_losses = {"clip": 0, "ot": 0, "mlm": 0, "mae": 0}
+            epoch_losses = {k: 0 for k in λ.keys()}
             steps = len(self.train_loaders["paired"])
 
             for step in tqdm(range(steps), desc=f"Epoch {epoch}"):
                 self.opt.zero_grad(set_to_none=True)
                 total_loss = 0.0
 
+                # Paired (CLIP loss)
                 b = self._next("paired")
-                out = self.model(images=b["image"].to(self.device),
-                                 input_ids=b["input_ids"].to(self.device),
-                                 attention_mask=b["attention_mask"].to(self.device))
+                out = self.model(
+                    images=b["image"].to(self.device),
+                    input_ids=b["input_ids"].to(self.device),
+                    attention_mask=b["attention_mask"].to(self.device),
+                )
                 loss_clip = clip_contrastive_loss(out["z_img"], out["z_txt"])
                 total_loss += λ["clip"] * loss_clip
                 epoch_losses["clip"] += loss_clip.item()
 
+                # Unpaired (OT loss) 
                 b = self._next("unpaired")
-                out = self.model(images=b["image"].to(self.device),
-                                 input_ids=b["input_ids"].to(self.device),
-                                 attention_mask=b["attention_mask"].to(self.device))
+                out = self.model(
+                    images=b["image"].to(self.device),
+                    input_ids=b["input_ids"].to(self.device),
+                    attention_mask=b["attention_mask"].to(self.device),
+                )
                 loss_ot = sinkhorn_ot_loss(out["z_img"], out["z_txt"])
                 total_loss += λ["ot"] * loss_ot
                 epoch_losses["ot"] += loss_ot.item()
 
+                # Text-only (MLM loss) 
                 b = self._next("text_only")
                 loss_mlm = self.mlm_loss_fn(
                     input_ids=b["input_ids"].to(self.device),
@@ -101,6 +105,7 @@ class Trainer:
                 total_loss += λ["mlm"] * loss_mlm
                 epoch_losses["mlm"] += loss_mlm.item()
 
+                # Image-only (MAE loss) 
                 b = self._next("image_only")
                 out = self.model(images=b["image"].to(self.device))
                 loss_mae = self.mae_loss_fn(out["pred_patches"], out["target_patches"], out["mask"])
@@ -124,10 +129,13 @@ class Trainer:
         with torch.no_grad():
             for batch in self.val_loader:
                 z_img = self.model.image_embed(batch["image"].to(self.device))
-                z_txt = self.model.text_embed(batch["input_ids"].to(self.device),
-                                              batch["attention_mask"].to(self.device))
+                z_txt = self.model.text_embed(
+                    batch["input_ids"].to(self.device),
+                    batch["attention_mask"].to(self.device),
+                )
                 imgs.append(z_img)
                 txts.append(z_txt)
+
         z_img = torch.cat(imgs)
         z_txt = torch.cat(txts)
         metrics = retrieval_accuracy(z_img, z_txt)
@@ -135,23 +143,18 @@ class Trainer:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Anchored MultiModal SSL Pretraining")
-
-    parser.add_argument("--root", type=str, default="data/train2017")
-    parser.add_argument("--ann", type=str, default="data/annotations/captions_train2017.json")
-    parser.add_argument("--val_root", type=str, default="data/val2017")
-    parser.add_argument("--val_ann", type=str, default="data/annotations/captions_val2017.json")
+    parser = argparse.ArgumentParser(description="Anchored MultiModal SSL Pretraining (Flickr30k)")
 
     parser.add_argument("--vision_name", type=str, default="vit_base_patch16_224")
     parser.add_argument("--text_name", type=str, default="bert-base-uncased")
     parser.add_argument("--shared_dim", type=int, default=256)
 
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--paired_fraction", type=float, default=0.2)
     parser.add_argument("--eval_every", type=int, default=1)
-    parser.add_argument("--save_dir", type=str, default="checkpoints")
+    parser.add_argument("--save_dir", type=str, default="checkpoints_flickr")
 
     parser.add_argument("--lambda_clip", type=float, default=1.0)
     parser.add_argument("--lambda_ot", type=float, default=0.5)

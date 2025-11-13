@@ -1,9 +1,9 @@
 # mm_model.py
 import torch
 import torch.nn as nn
-from vision_encoder import VisionEncoder
-from text_encoder import TextEncoder
-from projector import MLPProjector
+from models.vision_encoder import VisionEncoder
+from models.text_encoder import TextEncoder
+from models.projector import MLPProjector
 from models.mae_decoder import MAEDecoder, PretrainedMAEDecoder
 from utils.mae import patchify, random_masking
 
@@ -75,6 +75,8 @@ class MultiModalModel(nn.Module):
 
             # MAE reconstruction
             pred = self.mae_decoder(z_visible, ids_restore)
+            if hasattr(pred, "logits"):
+                pred = pred.logits
             out["pred_patches"] = pred
             out["target_patches"] = patches
 

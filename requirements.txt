@@ -6,3 +6,4 @@ pycocotools
 Pillow
 numpy
 datasets<3.0
+kugglehub

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+from typing import Optional
 
 class MLPProjector(nn.Module):
     """
@@ -12,7 +12,7 @@ class MLPProjector(nn.Module):
         self,
         in_dim: int,
         out_dim: int = 256,
-        hidden_dim: int | None = None,
+        hidden_dim: Optional[int] = None,
         use_bn: bool = False,
         normalize: bool = True,
     ):

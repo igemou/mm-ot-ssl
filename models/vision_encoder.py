@@ -2,6 +2,7 @@
 import torch
 import torch.nn as nn
 import timm
+from typing import Optional
 
 class VisionEncoder(nn.Module):
     """
@@ -12,9 +13,9 @@ class VisionEncoder(nn.Module):
         self,
         model_name: str = "vit_base_patch16_224",
         pretrained: bool = True,
-        embed_dim: int | None = None,
+        embed_dim: Optional[int] = None,
         freeze: bool = False,
-        return_patches: bool = False,  # NEW
+        return_patches: bool = False,
     ):
         super().__init__()
         self.return_patches = return_patches

@@ -1,10 +1,11 @@
 import torch
 import torch.nn as nn
 from transformers import AutoModel, AutoConfig
+from typing import Optional
 
 class TextEncoder(nn.Module):
     """
-    Wrapper around a HF text model
+    Wrapper around a Hugging Face text model.
     """
     def __init__(
         self,
@@ -25,10 +26,9 @@ class TextEncoder(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
+        attention_mask: Optional[torch.Tensor] = None,
     ):
         out = self.model(input_ids=input_ids, attention_mask=attention_mask)
         token_feats = out.last_hidden_state  # (B, L, D)
-        # CLS token as sentence embedding
-        pooled = token_feats[:, 0, :]  # (B, D)
+        pooled = token_feats[:, 0, :]        # CLS token as sentence embedding
         return pooled, token_feats

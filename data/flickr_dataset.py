@@ -4,19 +4,19 @@ from torchvision import transforms
 from transformers import AutoTokenizer
 import random
 
-class COCOMultiModalDataset(Dataset):
+
+class FlickrMultiModalDataset(Dataset):
     """
-    COCO dataset for multimodal SSL:
-      - paired:  image-caption pairs (20%)
-      - unpaired: mismatched images & captions
-      - image_only: image samples only
-      - text_only: caption samples only
+    Flickr30k multimodal dataset for SSL.
+    Modes:
+      - paired: matched image-caption pairs
+      - unpaired: mismatched image & caption
+      - image_only / text_only: single modality
     """
 
     def __init__(
         self,
-        split="train",
-        mode="paired",
+        split="paired",
         tokenizer_name="bert-base-uncased",
         image_size=224,
         max_length=32,
@@ -24,22 +24,16 @@ class COCOMultiModalDataset(Dataset):
         seed=42,
     ):
         super().__init__()
-        self.mode = mode
+        self.mode = split
         self.paired_fraction = paired_fraction
         random.seed(seed)
-        
-        self.dataset = load_dataset(
-            "shunk031/MSCOCO",
-            year=2017,
-            coco_task="captions",
-            trust_remote_code=True
-        )["train"]
 
+        # Flickr30k only has one split on HF ("test")
+        self.dataset = load_dataset("nlphuji/flickr30k", split="test")
 
         n_total = len(self.dataset)
         n_paired = int(n_total * paired_fraction)
 
-        # Splits for SSL setup
         indices = list(range(n_total))
         random.shuffle(indices)
         self.paired_idx = indices[:n_paired]
@@ -61,9 +55,7 @@ class COCOMultiModalDataset(Dataset):
             return len(self.paired_idx)
         elif self.mode == "unpaired":
             return min(len(self.unpaired_A), len(self.unpaired_B))
-        elif self.mode == "image_only":
-            return len(self.dataset)
-        elif self.mode == "text_only":
+        elif self.mode in ["image_only", "text_only"]:
             return len(self.dataset)
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
@@ -82,13 +74,13 @@ class COCOMultiModalDataset(Dataset):
         if self.mode == "paired":
             ex = self.dataset[self.paired_idx[idx]]
             image = self.transform(ex["image"])
-            caption = ex["sentences"]["raw"].strip()
+            caption = random.choice(ex["caption"]).strip()
 
         elif self.mode == "unpaired":
             img_ex = self.dataset[self.unpaired_A[idx]]
             txt_ex = self.dataset[self.unpaired_B[idx]]
             image = self.transform(img_ex["image"])
-            caption = txt_ex["sentences"]["raw"].strip()
+            caption = random.choice(txt_ex["caption"]).strip()
 
         elif self.mode == "image_only":
             ex = self.dataset[idx]
@@ -97,18 +89,12 @@ class COCOMultiModalDataset(Dataset):
 
         elif self.mode == "text_only":
             ex = self.dataset[idx]
-            caption = ex["sentences"]["raw"].strip()
+            caption = random.choice(ex["caption"]).strip()
             ids, mask = self._tokenize(caption)
             return {"input_ids": ids, "attention_mask": mask}
 
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
 
-        # Tokenize caption (paired or unpaired)
         ids, mask = self._tokenize(caption)
-
-        return {
-            "image": image,
-            "input_ids": ids,
-            "attention_mask": mask,
-        }
+        return {"image": image, "input_ids": ids, "attention_mask": mask}
