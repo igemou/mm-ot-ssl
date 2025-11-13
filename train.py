@@ -22,30 +22,29 @@ class Trainer:
     def __init__(self, args):
         self.args = args
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
         self.model = MultiModalModel(
             vision_name=args.vision_name,
             text_name=args.text_name,
             shared_dim=args.shared_dim,
         ).to(self.device)
 
-        self.opt = torch.optim.AdamW(
-            self.model.parameters(), lr=args.lr, weight_decay=1e-4
-        )
-
+        self.opt = torch.optim.AdamW(self.model.parameters(), lr=args.lr, weight_decay=1e-4)
         self.mlm_loss_fn = mlm_loss(model_name=args.text_name)
         self.mae_loss_fn = MAE_loss()
 
-    
         self._build_flickr_datasets()
         os.makedirs(args.save_dir, exist_ok=True)
 
     def _build_flickr_datasets(self):
-        """Prepare Flickr30k loaders for paired/unpaired/image/text modes."""
+        """Prepare Flickr30k loaders for paired/unpaired/image/text modes with 90/10 split."""
+        print("Building Flickr30k datasets...")
+
         self.train_loaders = {
             mode: DataLoader(
                 FlickrMultiModalDataset(
-                    split=mode, paired_fraction=self.args.paired_fraction
+                    split=mode,
+                    paired_fraction=self.args.paired_fraction,
+                    train=True,  # Use training split
                 ),
                 batch_size=self.args.batch_size,
                 shuffle=True,
@@ -55,15 +54,16 @@ class Trainer:
             for mode in ["paired", "unpaired", "text_only", "image_only"]
         }
 
+        # validation split
         self.val_loader = DataLoader(
-            FlickrMultiModalDataset(split="paired", paired_fraction=0.1),
+            FlickrMultiModalDataset(split="paired", paired_fraction=0.1, train=False),
             batch_size=self.args.batch_size,
             shuffle=False,
             num_workers=4,
         )
 
-        # Persistent iterators for cycling through data
         self.iters = {k: iter(v) for k, v in self.train_loaders.items()}
+        print("Flickr30k loaded successfully")
 
     def _next(self, name):
         """Safely fetch next batch (restarts iterator if exhausted)."""
@@ -91,7 +91,7 @@ class Trainer:
                 self.opt.zero_grad(set_to_none=True)
                 total_loss = 0.0
 
-                # 1. Paired contrastive (CLIP-style)
+                # Paired CLIP loss
                 b = self._next("paired")
                 out = self.model(
                     images=b["image"].to(self.device),
@@ -102,28 +102,19 @@ class Trainer:
                 total_loss += λ["clip"] * loss_clip
                 epoch_losses["clip"] += loss_clip.item()
 
-                # 2. Unpaired alignment (OT or Anchored OT)
+                # Unpaired alignment — plain or anchored OT
                 if self.args.use_anchored_ot:
-                    b_paired = self._next("paired")
-                    b_unpaired = self._next("unpaired")
+                    b_p = self._next("paired")
+                    b_u = self._next("unpaired")
 
-                    images = torch.cat(
-                        [b_paired["image"], b_unpaired["image"]], dim=0
-                    ).to(self.device)
-                    input_ids = torch.cat(
-                        [b_paired["input_ids"], b_unpaired["input_ids"]], dim=0
-                    ).to(self.device)
-                    attn_mask = torch.cat(
-                        [b_paired["attention_mask"], b_unpaired["attention_mask"]],
-                        dim=0,
-                    ).to(self.device)
+                    images = torch.cat([b_p["image"], b_u["image"]], dim=0).to(self.device)
+                    input_ids = torch.cat([b_p["input_ids"], b_u["input_ids"]], dim=0).to(self.device)
+                    attn_mask = torch.cat([b_p["attention_mask"], b_u["attention_mask"]], dim=0).to(self.device)
 
-                    out = self.model(
-                        images=images, input_ids=input_ids, attention_mask=attn_mask
-                    )
+                    out = self.model(images=images, input_ids=input_ids, attention_mask=attn_mask)
                     z_img, z_txt = out["z_img"], out["z_txt"]
 
-                    n_paired = len(b_paired["image"])
+                    n_paired = len(b_p["image"])
                     anchors = [(i, i) for i in range(n_paired)]
                     loss_ot = anchored_ot_loss(
                         z_img, z_txt, paired_indices=anchors, alpha=self.args.alpha_anchor
@@ -140,7 +131,7 @@ class Trainer:
                 total_loss += λ["ot"] * loss_ot
                 epoch_losses["ot"] += loss_ot.item()
 
-                # 3. Text-only masked language modeling
+                # Text-only MLM
                 b = self._next("text_only")
                 loss_mlm = self.mlm_loss_fn(
                     input_ids=b["input_ids"].to(self.device),
@@ -150,27 +141,23 @@ class Trainer:
                 total_loss += λ["mlm"] * loss_mlm
                 epoch_losses["mlm"] += loss_mlm.item()
 
-                # 4. Image-only masked autoencoding
+                # Image-only MAE
                 b = self._next("image_only")
                 out = self.model(images=b["image"].to(self.device))
-                loss_mae = self.mae_loss_fn(
-                    out["pred_patches"], out["target_patches"], out["mask"]
-                )
+                loss_mae = self.mae_loss_fn(out["pred_patches"], out["target_patches"], out["mask"])
                 total_loss += λ["mae"] * loss_mae
                 epoch_losses["mae"] += loss_mae.item()
 
-                # Backpropagation
                 total_loss.backward()
                 self.opt.step()
 
-            # Log averaged losses per epoch
             avg = {k: v / steps for k, v in epoch_losses.items()}
             print(f"Epoch {epoch} | Losses: {avg}")
 
-            torch.save(
-                self.model.state_dict(),
-                os.path.join(self.args.save_dir, f"epoch_{epoch}.pt"),
-            )
+            if epoch % 10 == 0 or epoch == self.args.epochs:
+                ckpt_path = os.path.join(self.args.save_dir, f"epoch_{epoch}.pt")
+                torch.save(self.model.state_dict(), ckpt_path)
+                print(f"Saved checkpoint: {ckpt_path}")
 
             if epoch % self.args.eval_every == 0:
                 self.evaluate(epoch)
@@ -195,17 +182,15 @@ class Trainer:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Anchored MultiModal SSL Pretraining (Flickr30k)"
-    )
+    parser = argparse.ArgumentParser(description="Anchored MultiModal SSL Pretraining (Flickr30k)")
 
-    # Model configs
+    # Model
     parser.add_argument("--vision_name", type=str, default="vit_base_patch16_224")
     parser.add_argument("--text_name", type=str, default="bert-base-uncased")
     parser.add_argument("--shared_dim", type=int, default=256)
 
     # Training
-    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--paired_fraction", type=float, default=0.2)
@@ -219,17 +204,8 @@ if __name__ == "__main__":
     parser.add_argument("--lambda_mae", type=float, default=1.0)
 
     # Anchored OT
-    parser.add_argument(
-        "--use_anchored_ot",
-        action="store_true",
-        help="Enable anchored OT instead of plain OT.",
-    )
-    parser.add_argument(
-        "--alpha_anchor",
-        type=float,
-        default=0.1,
-        help="Anchor strength multiplier for known pairs.",
-    )
+    parser.add_argument("--use_anchored_ot", action="store_true", help="Enable anchored OT instead of plain OT.")
+    parser.add_argument("--alpha_anchor", type=float, default=0.1, help="Anchor strength multiplier for known pairs.")
 
     args = parser.parse_args()
     trainer = Trainer(args)
