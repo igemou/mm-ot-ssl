@@ -19,7 +19,7 @@ export TORCH_HOME=$HF_HOME
 
 # Run training
 python train.py \
-    --epochs 10 \
+    --epochs 50 \
     --batch_size 16 \
     --lr 1e-4 \
     --eval_every 1 \
