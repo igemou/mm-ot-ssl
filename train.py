@@ -37,24 +37,39 @@ class Trainer:
         os.makedirs(args.save_dir, exist_ok=True)
 
     def _build_flickr_datasets(self):
-        """Prepare Flickr30k loaders for paired/unpaired/image/text modes."""
+        """Build datasets, skipping empty splits safely."""
         print("Building Flickr30k datasets...")
 
-        self.train_loaders = {
-            mode: DataLoader(
-                FlickrMultiModalDataset(
-                    split=mode,
-                    paired_fraction=self.args.paired_fraction,
-                    train=True,
-                ),
+        requested = ["paired", "unpaired", "text_only", "image_only"]
+        self.train_loaders = {}
+        self.iters = {}
+
+        for mode in requested:
+            dataset = FlickrMultiModalDataset(
+                split=mode,
+                paired_fraction=self.args.paired_fraction,
+                train=True,
+            )
+
+            if len(dataset) == 0:
+                print(f"[WARN] '{mode}' split is empty — skipping.")
+                continue
+
+            loader = DataLoader(
+                dataset,
                 batch_size=self.args.batch_size,
                 shuffle=True,
                 num_workers=4,
                 drop_last=True,
             )
-            for mode in ["paired", "unpaired", "text_only", "image_only"]
-        }
 
+            self.train_loaders[mode] = loader
+            self.iters[mode] = iter(loader)
+
+        if "paired" not in self.train_loaders:
+            raise RuntimeError("ERROR: 'paired' dataset cannot be empty.")
+
+        # Validation split
         self.val_loader = DataLoader(
             FlickrMultiModalDataset(split="paired", paired_fraction=0.1, train=False),
             batch_size=self.args.batch_size,
@@ -62,8 +77,7 @@ class Trainer:
             num_workers=4,
         )
 
-        self.iters = {k: iter(v) for k, v in self.train_loaders.items()}
-        print("Flickr30k loaded successfully")
+        print("Flickr30k loaded splits:", list(self.train_loaders.keys()))
 
     def _next(self, name):
         """Safely fetch next batch (restarts iterator if exhausted)."""
@@ -91,7 +105,7 @@ class Trainer:
                 self.opt.zero_grad(set_to_none=True)
                 total_loss = 0.0
 
-                # 1️⃣ Paired CLIP loss
+                # Paired CLIP loss
                 b = self._next("paired")
                 out = self.model(
                     images=b["image"].to(self.device),
@@ -102,55 +116,56 @@ class Trainer:
                 total_loss += λ["clip"] * loss_clip
                 epoch_losses["clip"] += loss_clip.item()
 
-                # Unpaired alignment: choose OT variant
-                b = self._next("unpaired")
-                out = self.model(
-                    images=b["image"].to(self.device),
-                    input_ids=b["input_ids"].to(self.device),
-                    attention_mask=b["attention_mask"].to(self.device),
-                )
-                z_img, z_txt = out["z_img"], out["z_txt"]
-
-                if self.args.use_anchored_ot:
-                    b_p = self._next("paired")
-                    images = torch.cat([b_p["image"], b["image"]], dim=0).to(self.device)
-                    input_ids = torch.cat([b_p["input_ids"], b["input_ids"]], dim=0).to(self.device)
-                    attn_mask = torch.cat([b_p["attention_mask"], b["attention_mask"]], dim=0).to(self.device)
-
-                    out = self.model(images=images, input_ids=input_ids, attention_mask=attn_mask)
+                # Unpaired OT 
+                if "unpaired" in self.train_loaders and λ["ot"] > 0:
+                    b = self._next("unpaired")
+                    out = self.model(
+                        images=b["image"].to(self.device),
+                        input_ids=b["input_ids"].to(self.device),
+                        attention_mask=b["attention_mask"].to(self.device),
+                    )
                     z_img, z_txt = out["z_img"], out["z_txt"]
 
-                    n_paired = len(b_p["image"])
-                    anchors = [(i, i) for i in range(n_paired)]
-                    loss_ot = anchored_ot_loss(
-                        z_img, z_txt, paired_indices=anchors, alpha=self.args.alpha_anchor
+                    if self.args.use_anchored_ot:
+                        b_p = self._next("paired")
+                        images = torch.cat([b_p["image"], b["image"]], dim=0).to(self.device)
+                        input_ids = torch.cat([b_p["input_ids"], b["input_ids"]], dim=0).to(self.device)
+                        attn_mask = torch.cat([b_p["attention_mask"], b["attention_mask"]], dim=0).to(self.device)
+
+                        out = self.model(images=images, input_ids=input_ids, attention_mask=attn_mask)
+                        z_img, z_txt = out["z_img"], out["z_txt"]
+
+                        n_paired = len(b_p["image"])
+                        anchors = [(i, i) for i in range(n_paired)]
+                        loss_ot = anchored_ot_loss(
+                            z_img, z_txt, paired_indices=anchors, alpha=self.args.alpha_anchor
+                        )
+                    elif self.args.use_gw_ot:
+                        loss_ot = gromov_wasserstein_loss(z_img, z_txt)
+                    else:
+                        loss_ot = sinkhorn_ot_loss(z_img, z_txt)
+
+                    total_loss += λ["ot"] * loss_ot
+                    epoch_losses["ot"] += loss_ot.item()
+
+                # Text-only MLM 
+                if "text_only" in self.train_loaders and λ["mlm"] > 0:
+                    b = self._next("text_only")
+                    loss_mlm = self.mlm_loss_fn(
+                        input_ids=b["input_ids"].to(self.device),
+                        attention_mask=b["attention_mask"].to(self.device),
+                        labels=b["input_ids"].to(self.device),
                     )
+                    total_loss += λ["mlm"] * loss_mlm
+                    epoch_losses["mlm"] += loss_mlm.item()
 
-                elif self.args.use_gw_ot:
-                    loss_ot = gromov_wasserstein_loss(z_img, z_txt)
-
-                else:
-                    loss_ot = sinkhorn_ot_loss(z_img, z_txt)
-
-                total_loss += λ["ot"] * loss_ot
-                epoch_losses["ot"] += loss_ot.item()
-
-                # 3️⃣ Text-only MLM
-                b = self._next("text_only")
-                loss_mlm = self.mlm_loss_fn(
-                    input_ids=b["input_ids"].to(self.device),
-                    attention_mask=b["attention_mask"].to(self.device),
-                    labels=b["input_ids"].to(self.device),
-                )
-                total_loss += λ["mlm"] * loss_mlm
-                epoch_losses["mlm"] += loss_mlm.item()
-
-                # Image-only MAE
-                b = self._next("image_only")
-                out = self.model(images=b["image"].to(self.device))
-                loss_mae = self.mae_loss_fn(out["pred_patches"], out["target_patches"], out["mask"])
-                total_loss += λ["mae"] * loss_mae
-                epoch_losses["mae"] += loss_mae.item()
+                # Image-only MAE 
+                if "image_only" in self.train_loaders and λ["mae"] > 0:
+                    b = self._next("image_only")
+                    out = self.model(images=b["image"].to(self.device))
+                    loss_mae = self.mae_loss_fn(out["pred_patches"], out["target_patches"], out["mask"])
+                    total_loss += λ["mae"] * loss_mae
+                    epoch_losses["mae"] += loss_mae.item()
 
                 total_loss.backward()
                 self.opt.step()
@@ -208,9 +223,9 @@ if __name__ == "__main__":
     parser.add_argument("--lambda_mae", type=float, default=1.0)
 
     # OT Variants
-    parser.add_argument("--use_anchored_ot", action="store_true", help="Enable Anchored OT instead of plain OT.")
-    parser.add_argument("--alpha_anchor", type=float, default=0.1, help="Anchor strength multiplier for known pairs.")
-    parser.add_argument("--use_gw_ot", action="store_true", help="Use Gromov–Wasserstein loss for unpaired alignment.")  # ✅ NEW
+    parser.add_argument("--use_anchored_ot", action="store_true")
+    parser.add_argument("--alpha_anchor", type=float, default=0.1)
+    parser.add_argument("--use_gw_ot", action="store_true")
 
     args = parser.parse_args()
     trainer = Trainer(args)
