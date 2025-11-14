@@ -40,7 +40,7 @@ python train.py \
     --batch_size 16 \
     --lr 1e-4 \
     --eval_every 1 \
-    --save_dir checkpoints/flickr_anchored_ot_05 \
+    --save_dir checkpoints/flickr_anchored_ot \
     --paired_fraction 0.2 \
     --lambda_clip 1.0 \
     --lambda_ot 0.2 \
@@ -49,5 +49,17 @@ python train.py \
     --use_anchored_ot \
     --alpha_anchor 0.8
 
+python train.py \
+  --epochs 30 \
+  --batch_size 16 \
+  --lr 1e-4 \
+  --eval_every 1 \
+  --save_dir checkpoints/flickr_gw_ot \
+  --paired_fraction 0.2 \
+  --lambda_clip 1.0 \
+  --lambda_ot 0.5 \
+  --lambda_mlm 1.0 \
+  --lambda_mae 1.0 \
+  --use_gw_ot
 
 echo "=== Done! Check logs/flickr_ssl_${SLURM_JOB_ID}.out ==="

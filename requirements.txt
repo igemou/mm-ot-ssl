@@ -8,3 +8,6 @@ numpy
 datasets<3.0
 kugglehub
 matplotlib
+pot
+sklearn
+umap-learn
