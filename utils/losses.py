@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModelForMaskedLM
-
+import ot
 
 # CLIP-Style Contrastive Loss
 def clip_contrastive_loss(z_img, z_txt, temperature: float = 0.07):
@@ -131,3 +131,27 @@ def anchored_ot_loss(x, y, paired_indices=None, eps=0.1, iters=50, alpha=0.1):
 
     P = torch.diag(u) @ K @ torch.diag(v)
     return torch.sum(P * C)
+
+# Gromov–Wasserstein
+def gromov_wasserstein_loss(x, y, eps=1e-3, loss_fun="square_loss"):
+    """
+    Gromov–Wasserstein distance between two feature distributions.
+    GW aligns based on relational geometry
+    """
+    # Convert to numpy (POT only supports numpy)
+    X = x.detach().cpu().numpy()
+    Y = y.detach().cpu().numpy()
+
+    # Pairwise distance matrices
+    Cx = ot.utils.dist(X, X)
+    Cy = ot.utils.dist(Y, Y)
+
+    # Uniform distributions
+    p = ot.unif(len(X))
+    q = ot.unif(len(Y))
+
+    # Compute GW distance
+    gw, _ = ot.gromov.gromov_wasserstein2(
+        Cx, Cy, p, q, loss_fun=loss_fun, epsilon=eps, verbose=False, log=True
+    )
+    return torch.tensor(gw, device=x.device, dtype=torch.float32)
