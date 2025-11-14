@@ -17,19 +17,37 @@ export HF_HOME=/oscar/scratch/igemou/hf_home
 export TRANSFORMERS_CACHE=$HF_HOME
 export TORCH_HOME=$HF_HOME
 
-# Run training
 python train.py \
-    --epochs 50 \
+  --epochs 30 \
+  --paired_fraction 0.2 \
+  --lambda_clip 1.0 \
+  --lambda_ot 0.0 \
+  --lambda_mlm 1.0 \
+  --lambda_mae 1.0 \
+  --save_dir checkpoints/flickr_clip_only
+
+python train.py \
+  --epochs 30 \
+  --paired_fraction 0.2 \
+  --lambda_clip 1.0 \
+  --lambda_ot 0.5 \
+  --lambda_mlm 1.0 \
+  --lambda_mae 1.0 \
+  --save_dir checkpoints/flickr_plain_ot
+
+python train.py \
+    --epochs 30 \
     --batch_size 16 \
     --lr 1e-4 \
     --eval_every 1 \
-    --save_dir checkpoints/flickr_pretrain \
+    --save_dir checkpoints/flickr_anchored_ot_05 \
     --paired_fraction 0.2 \
     --lambda_clip 1.0 \
-    --lambda_ot 0.5 \
+    --lambda_ot 0.2 \
     --lambda_mlm 1.0 \
     --lambda_mae 1.0 \
     --use_anchored_ot \
-    --alpha_anchor 0.1
+    --alpha_anchor 0.8
+
 
 echo "=== Done! Check logs/flickr_ssl_${SLURM_JOB_ID}.out ==="
