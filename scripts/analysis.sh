@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -p 3090-gcondo
+#SBATCH -p rsingh47-gcondo
 #SBATCH --job-name=Analysis
 #SBATCH --output=logs/Analysis_%j.out
 #SBATCH --error=logs/Analysis_%j.err
@@ -16,19 +16,19 @@ export HF_HOME=/oscar/scratch/igemou/hf_home
 export TRANSFORMERS_CACHE=$HF_HOME
 export TORCH_HOME=$HF_HOME
 
-python evaluate.py --checkpoint checkpoints/flickr_plain_ot/epoch_30.pt
-python analysis.py --checkpoint checkpoints/flickr_plain_ot/epoch_30.pt
+# python evaluate.py --checkpoint checkpoints/flickr_plain_ot/epoch_30.pt
+# python analysis.py --checkpoint checkpoints/flickr_plain_ot/epoch_30.pt
 
-python evaluate.py --checkpoint checkpoints/flickr_anchored_ot/epoch_30.pt 
-python analysis.py --checkpoint checkpoints/flickr_anchored_ot/epoch_30.pt
+# python evaluate.py --checkpoint checkpoints/flickr_anchored_ot/epoch_30.pt 
+# python analysis.py --checkpoint checkpoints/flickr_anchored_ot/epoch_30.pt
 
-python evaluate.py --checkpoint checkpoints/flickr_clip_20p/epoch_30.pt
-python analysis.py --checkpoint checkpoints/flickr_clip_20p/epoch_30.pt
+python evaluate.py --checkpoint checkpoints/flickr_clip_20p/epoch_20.pt
+python analysis.py --checkpoint checkpoints/flickr_clip_20p/epoch_20.pt
 
-python evaluate.py --checkpoint checkpoints/flickr_clip_100p/epoch_30.pt
-python analysis.py --checkpoint checkpoints/flickr_clip_100p/epoch_30.pt
+python evaluate.py --checkpoint checkpoints/flickr_clip_100p/epoch_20.pt
+python analysis.py --checkpoint checkpoints/flickr_clip_100p/epoch_20.pt
 
-python evaluate.py --checkpoint checkpoints/flickr_gw_ot_20p/epoch_30.pt
-python analysis.py --checkpoint checkpoints/flickr_gw_ot_20p/epoch_30.pt
+# python evaluate.py --checkpoint checkpoints/flickr_gw_ot_20p/epoch_20.pt
+# python analysis.py --checkpoint checkpoints/flickr_gw_ot_20p/epoch_20.pt
 
 echo "=== Done! Check logs/flickr_ssl_${SLURM_JOB_ID}.out ==="
