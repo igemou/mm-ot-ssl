@@ -14,7 +14,7 @@ parser = argparse.ArgumentParser(description="Analyze pretrained multimodal mode
 parser.add_argument(
     "--checkpoint",
     type=str,
-    default="checkpoints/flickr_pretrain/epoch_10.pt",
+    required=True,
     help="Path to model checkpoint (.pt file)",
 )
 parser.add_argument("--batch_size", type=int, default=32)
@@ -22,6 +22,15 @@ parser.add_argument("--shared_dim", type=int, default=256)
 args = parser.parse_args()
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+ckpt_path = args.checkpoint
+ckpt_name = os.path.basename(ckpt_path).replace(".pt", "")          # epoch_30
+exp_name = os.path.basename(os.path.dirname(ckpt_path))             # flickr_plain_ot
+
+OUT_DIR = f"analysis_outputs/{exp_name}_{ckpt_name}"
+os.makedirs(OUT_DIR, exist_ok=True)
+
+print(f"[INFO] Saving analysis results to: {OUT_DIR}")
 
 print(f"[INFO] Loading model from {args.checkpoint}...")
 model = MultiModalModel(
@@ -51,30 +60,32 @@ z_img = torch.cat(imgs)
 z_txt = torch.cat(txts)
 
 metrics = retrieval_accuracy(z_img, z_txt)
-print("\nRetrieval performance:")
+
+print("\n=== Retrieval performance ===")
 for k, v in metrics.items():
     print(f"  {k}: {v:.4f}")
 
-os.makedirs("analysis_outputs", exist_ok=True)
-np.savez("analysis_outputs/embeddings_flickr.npz", z_img=z_img.cpu(), z_txt=z_txt.cpu())
+with open(os.path.join(OUT_DIR, "retrieval_metrics.txt"), "w") as f:
+    for k, v in metrics.items():
+        f.write(f"{k}: {v:.4f}\n")
 
-print("\n[INFO] Running t-SNE and UMAP")
+np.savez(os.path.join(OUT_DIR, "embeddings.npz"),
+         z_img=z_img.cpu(), z_txt=z_txt.cpu())
+
+print("\n[INFO] Running t-SNE and UMAP...")
 emb = torch.cat([z_img, z_txt]).cpu().numpy()
 labels = np.array(["Image"] * len(z_img) + ["Text"] * len(z_txt))
 
-# t-SNE
 tsne = TSNE(n_components=2, perplexity=30, random_state=42)
 proj_tsne = tsne.fit_transform(emb)
 
-# UMAP
 umap = UMAP(n_components=2, n_neighbors=15, min_dist=0.1, random_state=42)
 proj_umap = umap.fit_transform(emb)
 
-# Combined figure
 plt.figure(figsize=(12, 5))
 
 plt.subplot(1, 2, 1)
-plt.scatter(proj_tsne[:len(z_img), 0], proj_tsne[:len(z_img), 1],
+plt.scatter(proj_tsne[:len(z_img), 0], proj_tsne[:len(z_img), 1], 
             s=10, alpha=0.6, label="Images")
 plt.scatter(proj_tsne[len(z_img):, 0], proj_tsne[len(z_img):, 1],
             s=10, alpha=0.6, label="Text")
@@ -89,10 +100,10 @@ plt.scatter(proj_umap[len(z_img):, 0], proj_umap[len(z_img):, 1],
 plt.title("UMAP projection")
 plt.legend()
 
-plt.suptitle(f"Shared Embedding Space after Anchored OT Pretraining\n{os.path.basename(args.checkpoint)}")
+plt.suptitle(f"Embedding Space Visualization\n{exp_name}/{ckpt_name}")
 plt.tight_layout()
-plt.savefig("analysis_outputs/tsne_umap_comparison.png", dpi=300)
-plt.show()
+plt.savefig(os.path.join(OUT_DIR, "tsne_umap.png"), dpi=300)
+plt.close()
 
 print("\n[INFO] Computing qualitative retrieval examples...")
 cos_sim = torch.nn.functional.cosine_similarity(
@@ -102,13 +113,20 @@ cos_sim = torch.nn.functional.cosine_similarity(
 num_samples = 3
 sample_ids = np.random.choice(len(z_img), num_samples, replace=False)
 
-for idx in sample_ids:
-    topk = torch.topk(cos_sim[idx], k=5).indices.cpu().tolist()
-    print(f"\nImage {idx} top-5 retrieved captions:")
-    for j in topk:
-        try:
-            captions = dataset[j]["caption"]
-        except KeyError:
-            captions = dataset.dataset[dataset.paired_idx[j]]["caption"]
-        text = captions[0] if isinstance(captions, list) else captions
-        print(f"  {text}")
+with open(os.path.join(OUT_DIR, "retrieval_examples.txt"), "w") as f:
+    for idx in sample_ids:
+        topk = torch.topk(cos_sim[idx], k=5).indices.cpu().tolist()
+        f.write(f"\nImage {idx} top-5 retrieved captions:\n")
+        print(f"\nImage {idx} top-5 retrieved captions:")
+
+        for j in topk:
+            try:
+                captions = dataset[j]["caption"]
+            except KeyError:
+                captions = dataset.dataset[dataset.paired_idx[j]]["caption"]
+
+            text = captions[0] if isinstance(captions, list) else captions
+            print(f"  {text}")
+            f.write(f"  {text}\n")
+
+print(f"\n[INFO] Analysis complete! Results saved in: {OUT_DIR}")
