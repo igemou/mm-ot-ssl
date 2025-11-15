@@ -20,7 +20,7 @@ source /gpfs/runtime/opt/miniconda/4.12.0/etc/profile.d/conda.sh
 
 conda activate anchor
 
-# which python
+which python3
 
 # conda list torch
 
