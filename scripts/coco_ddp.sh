@@ -7,7 +7,8 @@
 #SBATCH -t 10:00:00
 #SBATCH --mem=50g
 
-
+export MASTER_ADDR=$(scontrol show hostname $SLURM_NODELIST | head -n 1) 
+export MASTER_PORT=12345 
 
 echo "=== Starting COCO SSL pretraining ==="
 #  Load a CUDA module
@@ -59,12 +60,19 @@ cd /users/bjoo2/code/anchor/
 #   --lambda_clip 1.0 --lambda_ot 0.0 --lambda_mlm 1.0 --lambda_mae 1.0 \
 #   --save_dir /users/bjoo2/scratch/checkpoints/coco_clip_100p
 
-python train.py \
-  --dataset coco\
-  --epochs 30 --batch_size 16 --lr 1e-4 --eval_every 1 \
-  --paired_fraction 0.2 \
-  --lambda_clip 1.0 --lambda_ot 0.5 --lambda_mlm 1.0 --lambda_mae 1.0 \
-  --use_gw_ot \
-  --save_dir /users/bjoo2/scratch/checkpoints/coco_gw_ot_20p
+echo "Pretraining MAE"
+srun torchrun \
+  --nnodes=2 \
+  --nproc_per_node=1 \
+  --rdzv_id=100 \
+  --rdzv_backend=c10d \
+  --rdzv_endpoint=$MASTER_ADDR:29400 \
+  train.py \
+    --dataset coco\
+    --epochs 30 --batch_size 16 --lr 1e-4 --eval_every 1 \
+    --paired_fraction 0.2 \
+    --lambda_clip 1.0 --lambda_ot 0.5 --lambda_mlm 1.0 --lambda_mae 1.0 \
+    --use_gw_ot \
+    --save_dir /users/bjoo2/scratch/checkpoints/coco_gw_ot_20p
 
 echo "=== Done! Check logs/coco_ssl_${SLURM_JOB_ID}.out ==="
