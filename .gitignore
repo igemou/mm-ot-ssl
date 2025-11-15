@@ -11,3 +11,4 @@ checkpoints/
 lightning_logs/
 .vscode/
 .env
+analysis_outputs
