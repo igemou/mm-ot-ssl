@@ -36,4 +36,4 @@ python train.py \
     --alpha_anchor 0.1 \
     --dataset coco
 
-echo "=== Done! Check logs/flickr_ssl_${SLURM_JOB_ID}.out ==="
+echo "=== Done! Check logs/coco_ssl_${SLURM_JOB_ID}.out ==="

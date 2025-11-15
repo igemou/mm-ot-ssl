@@ -82,34 +82,47 @@ class Trainer:
         print("Flickr30k loaded splits:", list(self.train_loaders.keys()))
 
     def _build_coco_datasets(self):
-        """Prepare COCO loaders for paired/unpaired/image/text modes with 90/10 split."""
+        """Build datasets, skipping empty splits safely."""
         print("Building COCO datasets...")
 
-        self.train_loaders = {
-            mode: DataLoader(
-                COCOMultiModalDataset(
-                    split=mode,
-                    paired_fraction=self.args.paired_fraction,
-                    train=True,  # Use training split
-                ),
+        requested = ["paired", "unpaired", "text_only", "image_only"]
+        self.train_loaders = {}
+        self.iters = {}
+
+        for mode in requested:
+            dataset = COCOMultiModalDataset(
+                split=mode,
+                paired_fraction=self.args.paired_fraction,
+                train=True,
+            )
+
+            if len(dataset) == 0:
+                print(f"[WARN] '{mode}' split is empty — skipping.")
+                continue
+
+            loader = DataLoader(
+                dataset,
                 batch_size=self.args.batch_size,
                 shuffle=True,
                 num_workers=4,
                 drop_last=True,
             )
-            for mode in ["paired", "unpaired", "text_only", "image_only"]
-        }
 
-        # validation split
+            self.train_loaders[mode] = loader
+            self.iters[mode] = iter(loader)
+
+        if "paired" not in self.train_loaders:
+            raise RuntimeError("ERROR: 'paired' dataset cannot be empty.")
+
+        # Validation split
         self.val_loader = DataLoader(
-            COCOMultiModalDataset(split="paired", paired_fraction=0.1, train=False),
+            FlickrMultiModalDataset(split="paired", paired_fraction=0.1, train=False),
             batch_size=self.args.batch_size,
             shuffle=False,
             num_workers=4,
         )
 
-        self.iters = {k: iter(v) for k, v in self.train_loaders.items()}
-        print("COCO loaded successfully")
+        print("COCO loaded splits:", list(self.train_loaders.keys()))
 
     def _next(self, name):
         """Safely fetch next batch (restarts iterator if exhausted)."""
