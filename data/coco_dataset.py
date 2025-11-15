@@ -1,6 +1,6 @@
 from datasets import load_dataset
 from torch.utils.data import Dataset
-from torchvision import transforms
+from torchvision import transforms, datasets
 from transformers import AutoTokenizer
 import random
 
@@ -27,13 +27,15 @@ class COCOMultiModalDataset(Dataset):
         self.mode = mode
         self.paired_fraction = paired_fraction
         random.seed(seed)
+
+        data_path = "~/scratch/coco"
         
-        self.dataset = load_dataset(
-            "shunk031/MSCOCO",
-            year=2017,
-            coco_task="captions",
-            trust_remote_code=True
-        )["train"]
+        if split == "train":
+            self.dataset = datasets.CocoCaptions(root=f"{data_path}/train2014", 
+                                  annFile=f"{data_path}/annotations/captions_train2014.json")
+        else:
+            self.dataset = datasets.CocoCaptions(root=f"{data_path}/val2014", 
+                                  annFile=f"{data_path}/annotations/captions_val2014.json")
 
 
         n_total = len(self.dataset)

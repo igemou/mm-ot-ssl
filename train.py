@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from models.mm_model import MultiModalModel
-from data.flickr_dataset import FlickrMultiModalDataset
+from data import FlickrMultiModalDataset, COCOMultiModalDataset
 from utils.losses import (
     clip_contrastive_loss,
     sinkhorn_ot_loss,
@@ -33,7 +33,9 @@ class Trainer:
         self.mlm_loss_fn = mlm_loss(model_name=args.text_name)
         self.mae_loss_fn = MAE_loss()
 
-        self._build_flickr_datasets()
+        data_fns = {"flickr": self._build_flickr_datasets,
+                    "coco": self._build_coco_datasets}
+        data_fns[args.dataset]()
         os.makedirs(args.save_dir, exist_ok=True)
 
     def _build_flickr_datasets(self):
@@ -79,6 +81,36 @@ class Trainer:
 
         print("Flickr30k loaded splits:", list(self.train_loaders.keys()))
 
+    def _build_coco_datasets(self):
+        """Prepare COCO loaders for paired/unpaired/image/text modes with 90/10 split."""
+        print("Building COCO datasets...")
+
+        self.train_loaders = {
+            mode: DataLoader(
+                COCOMultiModalDataset(
+                    split=mode,
+                    paired_fraction=self.args.paired_fraction,
+                    train=True,  # Use training split
+                ),
+                batch_size=self.args.batch_size,
+                shuffle=True,
+                num_workers=4,
+                drop_last=True,
+            )
+            for mode in ["paired", "unpaired", "text_only", "image_only"]
+        }
+
+        # validation split
+        self.val_loader = DataLoader(
+            COCOMultiModalDataset(split="paired", paired_fraction=0.1, train=False),
+            batch_size=self.args.batch_size,
+            shuffle=False,
+            num_workers=4,
+        )
+
+        self.iters = {k: iter(v) for k, v in self.train_loaders.items()}
+        print("COCO loaded successfully")
+
     def _next(self, name):
         """Safely fetch next batch (restarts iterator if exhausted)."""
         try:
@@ -101,7 +133,8 @@ class Trainer:
             epoch_losses = {k: 0.0 for k in λ}
             steps = len(self.train_loaders["paired"])
 
-            for _ in tqdm(range(steps), desc=f"Epoch {epoch}"):
+            
+            for _ in (pbar := tqdm(range(steps), desc=f"Epoch {epoch}")):
                 self.opt.zero_grad(set_to_none=True)
                 total_loss = 0.0
 
@@ -169,9 +202,13 @@ class Trainer:
 
                 total_loss.backward()
                 self.opt.step()
+                pbar.set_postfix({"MAE Loss": loss_mae.item(),
+                                  "CLIP": loss_clip.item(),
+                                  "OT": loss_ot.item(),
+                                  "MLM": loss_mlm.item()})
 
             avg = {k: v / steps for k, v in epoch_losses.items()}
-            print(f"Epoch {epoch} | Losses: {avg}")
+            # print(f"Epoch {epoch} | Losses: {avg}")
 
             if epoch % 10 == 0 or epoch == self.args.epochs:
                 ckpt_path = os.path.join(self.args.save_dir, f"epoch_{epoch}.pt")
@@ -207,6 +244,9 @@ if __name__ == "__main__":
     parser.add_argument("--vision_name", type=str, default="vit_base_patch16_224")
     parser.add_argument("--text_name", type=str, default="bert-base-uncased")
     parser.add_argument("--shared_dim", type=int, default=256)
+
+    #Dataset
+    parser.add_argument("--dataset", type=str, choices=["flickr", "coco"], default="flickr")
 
     # Training
     parser.add_argument("--epochs", type=int, default=50)
