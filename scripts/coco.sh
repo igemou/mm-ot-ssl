@@ -20,13 +20,15 @@ source /gpfs/runtime/opt/miniconda/4.12.0/etc/profile.d/conda.sh
 
 conda activate anchor
 
+cd /users/bjoo2/code/anchor/
+
 # Run training
 python train.py \
     --epochs 50 \
     --batch_size 16 \
     --lr 1e-4 \
     --eval_every 1 \
-    --save_dir ~/scratch/coco/checkpoints/pretrain \
+    --save_dir /users/bjoo2/scratch/coco/checkpoints/pretrain \
     --paired_fraction 0.2 \
     --lambda_clip 1.0 \
     --lambda_ot 0.5 \
