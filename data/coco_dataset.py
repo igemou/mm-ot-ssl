@@ -6,42 +6,43 @@ import random
 
 class COCOMultiModalDataset(Dataset):
     """
-    COCO dataset for multimodal SSL:
-      - paired:  image-caption pairs (20%)
-      - unpaired: mismatched images & captions
-      - image_only: image samples only
-      - text_only: caption samples only
+    COCO multimodal dataset for SSL.
+    Modes:
+      - paired: matched image-caption pairs
+      - unpaired: mismatched image & caption
+      - image_only / text_only: single modality
     """
 
     def __init__(
         self,
-        split="train",
-        mode="paired",
+        split="paired",
         tokenizer_name="bert-base-uncased",
         image_size=224,
         max_length=32,
         paired_fraction=0.2,
         seed=42,
+        train=True,
+        val_ratio=0.1,
     ):
         super().__init__()
-        self.mode = mode
+        self.mode = split
         self.paired_fraction = paired_fraction
         random.seed(seed)
 
-        data_path = "~/scratch/coco"
+        # Load the dataset
+
+        data_path = "/users/bjoo2/scratch/coco"
         
-        if split == "train":
+        if train:
             self.dataset = datasets.CocoCaptions(root=f"{data_path}/train2014", 
                                   annFile=f"{data_path}/annotations/captions_train2014.json")
         else:
             self.dataset = datasets.CocoCaptions(root=f"{data_path}/val2014", 
                                   annFile=f"{data_path}/annotations/captions_val2014.json")
 
-
+        # Create paired/unpaired index partitions
         n_total = len(self.dataset)
         n_paired = int(n_total * paired_fraction)
-
-        # Splits for SSL setup
         indices = list(range(n_total))
         random.shuffle(indices)
         self.paired_idx = indices[:n_paired]
@@ -63,9 +64,7 @@ class COCOMultiModalDataset(Dataset):
             return len(self.paired_idx)
         elif self.mode == "unpaired":
             return min(len(self.unpaired_A), len(self.unpaired_B))
-        elif self.mode == "image_only":
-            return len(self.dataset)
-        elif self.mode == "text_only":
+        elif self.mode in ["image_only", "text_only"]:
             return len(self.dataset)
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
@@ -82,35 +81,29 @@ class COCOMultiModalDataset(Dataset):
 
     def __getitem__(self, idx):
         if self.mode == "paired":
-            ex = self.dataset[self.paired_idx[idx]]
-            image = self.transform(ex["image"])
-            caption = ex["sentences"]["raw"].strip()
+            img, cap = self.dataset[self.paired_idx[idx]]
+            image = self.transform(img)
+            caption = random.choice(cap).strip()
 
         elif self.mode == "unpaired":
-            img_ex = self.dataset[self.unpaired_A[idx]]
-            txt_ex = self.dataset[self.unpaired_B[idx]]
-            image = self.transform(img_ex["image"])
-            caption = txt_ex["sentences"]["raw"].strip()
+            img, _ = self.dataset[self.unpaired_A[idx]]
+            _, cap = self.dataset[self.unpaired_B[idx]]
+            image = self.transform(img)
+            caption = random.choice(cap).strip()
 
         elif self.mode == "image_only":
-            ex = self.dataset[idx]
-            image = self.transform(ex["image"])
+            img, _ = self.dataset[idx]
+            image = self.transform(img)
             return {"image": image}
 
         elif self.mode == "text_only":
-            ex = self.dataset[idx]
-            caption = ex["sentences"]["raw"].strip()
+            _, cap = self.dataset[idx]
+            caption = random.choice(cap).strip()
             ids, mask = self._tokenize(caption)
             return {"input_ids": ids, "attention_mask": mask}
 
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
 
-        # Tokenize caption (paired or unpaired)
         ids, mask = self._tokenize(caption)
-
-        return {
-            "image": image,
-            "input_ids": ids,
-            "attention_mask": mask,
-        }
+        return {"image": image, "input_ids": ids, "attention_mask": mask}

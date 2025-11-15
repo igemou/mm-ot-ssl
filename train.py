@@ -33,6 +33,8 @@ class Trainer:
         self.mlm_loss_fn = mlm_loss(model_name=args.text_name)
         self.mae_loss_fn = MAE_loss()
 
+        print(f"Dataset: {args.dataset}")
+
         data_fns = {"flickr": self._build_flickr_datasets,
                     "coco": self._build_coco_datasets}
         data_fns[args.dataset]()
@@ -116,7 +118,7 @@ class Trainer:
 
         # Validation split
         self.val_loader = DataLoader(
-            FlickrMultiModalDataset(split="paired", paired_fraction=0.1, train=False),
+            COCOMultiModalDataset(split="paired", paired_fraction=0.1, train=False),
             batch_size=self.args.batch_size,
             shuffle=False,
             num_workers=4,

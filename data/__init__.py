@@ -1,2 +1,2 @@
-from coco_dataset import *
-from flickr_dataset import *
+from data.coco_dataset import *
+from data.flickr_dataset import *
