@@ -20,14 +20,14 @@ source /gpfs/runtime/opt/miniconda/4.12.0/etc/profile.d/conda.sh
 
 conda activate anchor
 
-which python
+# which python
 
-conda list torch
+# conda list torch
 
 cd /users/bjoo2/code/anchor/
 
 # Run training
-python train.py \
+python3 train.py \
     --epochs 50 \
     --batch_size 16 \
     --lr 1e-4 \
