@@ -16,11 +16,11 @@ export HF_HOME=/oscar/scratch/igemou/hf_home
 export TRANSFORMERS_CACHE=$HF_HOME
 export TORCH_HOME=$HF_HOME
 
-# python evaluate.py --checkpoint checkpoints/flickr_plain_ot/epoch_30.pt
-# python analysis.py --checkpoint checkpoints/flickr_plain_ot/epoch_30.pt
+python evaluate.py --checkpoint checkpoints/flickr_plain_ot/epoch_30.pt
+python analysis.py --checkpoint checkpoints/flickr_plain_ot/epoch_30.pt
 
-# python evaluate.py --checkpoint checkpoints/flickr_anchored_ot/epoch_30.pt 
-# python analysis.py --checkpoint checkpoints/flickr_anchored_ot/epoch_30.pt
+python evaluate.py --checkpoint checkpoints/flickr_anchored_ot/epoch_30.pt 
+python analysis.py --checkpoint checkpoints/flickr_anchored_ot/epoch_30.pt
 
 python evaluate.py --checkpoint checkpoints/flickr_clip_20p/epoch_20.pt
 python analysis.py --checkpoint checkpoints/flickr_clip_20p/epoch_20.pt
@@ -28,7 +28,7 @@ python analysis.py --checkpoint checkpoints/flickr_clip_20p/epoch_20.pt
 python evaluate.py --checkpoint checkpoints/flickr_clip_100p/epoch_20.pt
 python analysis.py --checkpoint checkpoints/flickr_clip_100p/epoch_20.pt
 
-# python evaluate.py --checkpoint checkpoints/flickr_gw_ot_20p/epoch_20.pt
-# python analysis.py --checkpoint checkpoints/flickr_gw_ot_20p/epoch_20.pt
+python evaluate.py --checkpoint checkpoints/flickr_gw_ot_20p/epoch_20.pt
+python analysis.py --checkpoint checkpoints/flickr_gw_ot_20p/epoch_20.pt
 
 echo "=== Done! Check logs/flickr_ssl_${SLURM_JOB_ID}.out ==="
