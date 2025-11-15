@@ -223,7 +223,7 @@ class Trainer:
                                   "MLM": loss_mlm.item()})
 
             avg = {k: v / steps for k, v in epoch_losses.items()}
-            # print(f"Epoch {epoch} | Losses: {avg}")
+            print(f"Epoch {epoch} | Losses: {avg}")
 
             if epoch % 10 == 0 or epoch == self.args.epochs:
                 ckpt_path = os.path.join(self.args.save_dir, f"epoch_{epoch}.pt")
