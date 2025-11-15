@@ -1,7 +1,11 @@
 import os
-import torch
 import argparse
-from torch.utils.data import DataLoader
+import torch
+from torch.utils.data import DataLoader, DistributedSampler
+from torch import optim
+import torch.distributed as dist 
+from torch.nn.parallel import DistributedDataParallel as DDP
+
 from tqdm import tqdm
 
 from models.mm_model import MultiModalModel
@@ -15,6 +19,24 @@ from utils.losses import (
     MAE_loss,
 )
 from utils.metrics import retrieval_accuracy
+from utils.ddpmetric import SmoothedValue
+
+def setup(model):
+    torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
+    acc = torch.accelerator.current_accelerator()
+    backend = torch.distributed.get_default_backend_for_device(acc)
+    dist.init_process_group(backend)
+    rank = dist.get_rank()
+    print(f"Start running basic DDP example on rank {rank}.")
+
+    # create model and move it to GPU with id rank
+    device_id = rank % torch.accelerator.device_count()
+    model = model.to(device_id)
+    model = DDP(model, device_ids=[device_id])
+    return model, device_id
+
+def cleanup():
+    dist.destroy_process_group() 
 
 
 class Trainer:
@@ -22,12 +44,12 @@ class Trainer:
 
     def __init__(self, args):
         self.args = args
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = MultiModalModel(
+        model = MultiModalModel(
             vision_name=args.vision_name,
             text_name=args.text_name,
             shared_dim=args.shared_dim,
-        ).to(self.device)
+        )
+        self.model, self.device = setup(model)
 
         self.opt = torch.optim.AdamW(self.model.parameters(), lr=args.lr, weight_decay=1e-4)
         self.mlm_loss_fn = mlm_loss(model_name=args.text_name)
@@ -40,13 +62,14 @@ class Trainer:
         data_fns[args.dataset]()
         os.makedirs(args.save_dir, exist_ok=True)
 
-    def _build_flickr_datasets(self):
+    def _build_flickr_datasets(self, ddp=True):
         """Build datasets, skipping empty splits safely."""
         print("Building Flickr30k datasets...")
 
         requested = ["paired", "unpaired", "text_only", "image_only"]
         self.train_loaders = {}
         self.iters = {}
+        self.samplers = {}
 
         for mode in requested:
             dataset = FlickrMultiModalDataset(
@@ -54,6 +77,7 @@ class Trainer:
                 paired_fraction=self.args.paired_fraction,
                 train=True,
             )
+            sampler = DistributedSampler(dataset) if ddp else None
 
             if len(dataset) == 0:
                 print(f"[WARN] '{mode}' split is empty — skipping.")
@@ -65,31 +89,33 @@ class Trainer:
                 shuffle=True,
                 num_workers=4,
                 drop_last=True,
+                sampler=sampler,
             )
 
-            self.train_loaders[mode] = loader
+            self.train_loaders[mode] = (loader, sampler)
             self.iters[mode] = iter(loader)
+            self.samplers[mode] = sampler
 
         if "paired" not in self.train_loaders:
             raise RuntimeError("ERROR: 'paired' dataset cannot be empty.")
 
         # Validation split
-        self.val_loader = DataLoader(
-            FlickrMultiModalDataset(split="paired", paired_fraction=0.1, train=False),
-            batch_size=self.args.batch_size,
-            shuffle=False,
-            num_workers=4,
-        )
+        dataset = FlickrMultiModalDataset(split="paired", paired_fraction=0.1, train=False),
+        self.val_loader = DataLoader(dataset,
+                                     batch_size=self.args.batch_size,
+                                     shuffle=False,
+                                     num_workers=4)
 
         print("Flickr30k loaded splits:", list(self.train_loaders.keys()))
 
-    def _build_coco_datasets(self):
+    def _build_coco_datasets(self, ddp=True):
         """Build datasets, skipping empty splits safely."""
         print("Building COCO datasets...")
 
         requested = ["paired", "unpaired", "text_only", "image_only"]
         self.train_loaders = {}
         self.iters = {}
+        self.samplers = {}
 
         for mode in requested:
             dataset = COCOMultiModalDataset(
@@ -98,6 +124,8 @@ class Trainer:
                 train=True,
             )
 
+            sampler = DistributedSampler(dataset) if ddp else None
+
             if len(dataset) == 0:
                 print(f"[WARN] '{mode}' split is empty — skipping.")
                 continue
@@ -108,21 +136,23 @@ class Trainer:
                 shuffle=True,
                 num_workers=4,
                 drop_last=True,
+                sampler=sampler,
             )
 
             self.train_loaders[mode] = loader
             self.iters[mode] = iter(loader)
+            self.samplers[mode] = sampler
 
         if "paired" not in self.train_loaders:
             raise RuntimeError("ERROR: 'paired' dataset cannot be empty.")
 
         # Validation split
-        self.val_loader = DataLoader(
-            COCOMultiModalDataset(split="paired", paired_fraction=0.1, train=False),
-            batch_size=self.args.batch_size,
-            shuffle=False,
-            num_workers=4,
-        )
+        dataset = COCOMultiModalDataset(split="paired", paired_fraction=0.1, train=False)
+
+        self.val_loader = DataLoader(dataset,
+                                      batch_size=self.args.batch_size,
+                                      shuffle=False,
+                                      num_workers=4)
 
         print("COCO loaded splits:", list(self.train_loaders.keys()))
 
@@ -145,9 +175,12 @@ class Trainer:
 
         for epoch in range(1, self.args.epochs + 1):
             self.model.train()
-            epoch_losses = {k: 0.0 for k in λ}
+            # epoch_losses = {k: 0.0 for k in λ}
             steps = len(self.train_loaders["paired"])
 
+            for sampler in self.samplers: sampler.set_epoch(epoch)
+
+            metrics = {k: SmoothedValue() for k in λ}
             
             for _ in (pbar := tqdm(range(steps), desc=f"Epoch {epoch}")):
                 self.opt.zero_grad(set_to_none=True)
@@ -162,7 +195,8 @@ class Trainer:
                 )
                 loss_clip = clip_contrastive_loss(out["z_img"], out["z_txt"])
                 total_loss += λ["clip"] * loss_clip
-                epoch_losses["clip"] += loss_clip.item()
+                # epoch_losses["clip"] += loss_clip.item()
+                metrics["clip"].update(loss_clip.item())
 
                 # Unpaired OT 
                 if "unpaired" in self.train_loaders and λ["ot"] > 0:
@@ -194,7 +228,8 @@ class Trainer:
                         loss_ot = sinkhorn_ot_loss(z_img, z_txt)
 
                     total_loss += λ["ot"] * loss_ot
-                    epoch_losses["ot"] += loss_ot.item()
+                    # epoch_losses["ot"] += loss_ot.item()
+                    metrics["ot"].update(loss_ot.item())
 
                 # Text-only MLM 
                 if "text_only" in self.train_loaders and λ["mlm"] > 0:
@@ -205,7 +240,8 @@ class Trainer:
                         labels=b["input_ids"].to(self.device),
                     )
                     total_loss += λ["mlm"] * loss_mlm
-                    epoch_losses["mlm"] += loss_mlm.item()
+                    # epoch_losses["mlm"] += loss_mlm.item()
+                    metrics["mlm"].update(loss_mlm.item())
 
                 # Image-only MAE 
                 if "image_only" in self.train_loaders and λ["mae"] > 0:
@@ -213,7 +249,8 @@ class Trainer:
                     out = self.model(images=b["image"].to(self.device))
                     loss_mae = self.mae_loss_fn(out["pred_patches"], out["target_patches"], out["mask"])
                     total_loss += λ["mae"] * loss_mae
-                    epoch_losses["mae"] += loss_mae.item()
+                    # epoch_losses["mae"] += loss_mae.item()
+                    metrics["mae"].update(loss_mae.item())
 
                 total_loss.backward()
                 self.opt.step()
@@ -221,17 +258,27 @@ class Trainer:
                                   "clip": loss_clip.item(),
                                   "ot": loss_ot.item(),
                                   "mlm": loss_mlm.item()})
+                
+                torch.cuda.synchronize()
 
-            avg = {k: v / steps for k, v in epoch_losses.items()}
+
+            # avg = {k: v / steps for k, v in epoch_losses.items()}
+            for _, meter in metrics.items():
+                meter.synchronize_between_processes(device_ids=[self.device])
+
+            avg = {k: meter.global_avg for k, meter in metrics.items()}
+
             print(f"Epoch {epoch} | Losses: {avg}")
 
-            if epoch % 10 == 0 or epoch == self.args.epochs:
+            if (epoch % 10 == 0 or epoch == self.args.epochs) and (int(os.environ["LOCAL_RANK"]) == 0):
                 ckpt_path = os.path.join(self.args.save_dir, f"epoch_{epoch}.pt")
                 torch.save(self.model.state_dict(), ckpt_path)
                 print(f"Saved checkpoint: {ckpt_path}")
 
-            if epoch % self.args.eval_every == 0:
+            if (epoch % self.args.eval_every == 0) and (int(os.environ["LOCAL_RANK"]) == 0):
                 self.evaluate(epoch)
+
+        cleanup()
 
     def evaluate(self, epoch):
         self.model.eval()
