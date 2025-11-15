@@ -277,6 +277,8 @@ class Trainer:
 
             if (epoch % self.args.eval_every == 0) and (int(os.environ["LOCAL_RANK"]) == 0):
                 self.evaluate(epoch)
+            
+            torch.cuda.synchronize()
 
         cleanup()
 
