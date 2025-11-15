@@ -31,4 +31,13 @@ python analysis.py --checkpoint checkpoints/flickr_clip_100p/epoch_20.pt
 python evaluate.py --checkpoint checkpoints/flickr_gw_ot_20p/epoch_20.pt
 python analysis.py --checkpoint checkpoints/flickr_gw_ot_20p/epoch_20.pt
 
+
+python qualitative_plots.py \
+  --checkpoints \
+    checkpoints/flickr_plain_ot/epoch_30.pt \
+    checkpoints/flickr_anchored_ot/epoch_30.pt \
+    checkpoints/flickr_clip_20p/epoch_20.pt \
+    checkpoints/flickr_clip_100p/epoch_20.pt \
+    checkpoints/flickr_gw_ot_20p/epoch_20.pt
+
 echo "=== Done! Check logs/flickr_ssl_${SLURM_JOB_ID}.out ==="
