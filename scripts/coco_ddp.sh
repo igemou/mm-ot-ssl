@@ -69,7 +69,7 @@ srun torchrun \
   --rdzv_endpoint=$MASTER_ADDR:29400 \
   train.py \
     --dataset coco\
-    --epochs 30 --batch_size 16 --lr 1e-4 --eval_every 1 \
+    --epochs 30 --batch_size 32 --lr 1e-4 --eval_every 1 \
     --paired_fraction 0.2 \
     --lambda_clip 1.0 --lambda_ot 0.5 --lambda_mlm 1.0 --lambda_mae 1.0 \
     --use_gw_ot \

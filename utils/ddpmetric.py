@@ -24,6 +24,8 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 
+from utils.metrics import cosine_similarity
+
 
 class SmoothedValue(object):
     """Track a series of values and provide access to smoothed values over a
@@ -123,3 +125,36 @@ class MetricLogger(object):
 
     def add_meter(self, name, meter):
         self.meters[name] = meter
+
+# Retrieval Accuracy (Image→Text and Text→Image)
+def retrieval_accuracy(z_img, z_txt, device, topk=(1, 5)):
+    """
+    Computes retrieval accuracy for image→text and text→image directions.
+    """
+    sim = cosine_similarity(z_img, z_txt)
+    labels = torch.arange(z_img.size(0), device=z_img.device)
+    results = {}
+    for k in topk:
+        results[f"i2t@{k}"] = SmoothedValue()
+        results[f"t2i@{k}"] = SmoothedValue()
+
+
+    # Image → Text retrieval
+    rank_i = sim.argsort(dim=-1, descending=True)
+    for k in topk:
+        correct_i = (rank_i[:, :k] == labels.unsqueeze(1)).any(dim=1).float()
+        results[f"i2t@{k}"].update(correct_i.sum(), n=len(z_img))
+
+    # Text → Image retrieval
+    rank_t = sim.t().argsort(dim=-1, descending=True)
+    for k in topk:
+        correct_t = (rank_t[:, :k] == labels.unsqueeze(1)).any(dim=1).float()
+        results[f"t2i@{k}"].update(correct_t.sum(), n=len(z_img))
+
+
+    for _, meter in results.items():
+        meter.synchronize_between_processes(device_ids=[device])
+
+    avg = {k: meter.global_avg for k, meter in metrics.items()}
+
+    return avg

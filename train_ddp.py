@@ -6,7 +6,7 @@ from torch import optim
 import torch.distributed as dist 
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from tqdm import tqdm
+from tqdm import trange
 
 from models.mm_model import MultiModalModel
 from data import FlickrMultiModalDataset, COCOMultiModalDataset
@@ -18,8 +18,7 @@ from utils.losses import (
     mlm_loss,
     MAE_loss,
 )
-from utils.metrics import retrieval_accuracy
-from utils.ddpmetric import SmoothedValue
+from utils.ddpmetric import SmoothedValue, retrieval_accuracy
 
 def setup(model):
     torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
@@ -61,6 +60,9 @@ class Trainer:
                     "coco": self._build_coco_datasets}
         data_fns[args.dataset]()
         os.makedirs(args.save_dir, exist_ok=True)
+
+        self.best_score = -1
+        self.early_stop_counter = 0
 
     def _build_flickr_datasets(self, ddp=True):
         """Build datasets, skipping empty splits safely."""
@@ -148,11 +150,12 @@ class Trainer:
 
         # Validation split
         dataset = COCOMultiModalDataset(split="paired", paired_fraction=0.1, train=False)
-
+        self.val_sampler = DistributedSampler(dataset) if ddp else None
         self.val_loader = DataLoader(dataset,
                                       batch_size=self.args.batch_size,
                                       shuffle=False,
-                                      num_workers=4)
+                                      num_workers=4,
+                                      sampler=sampler)
 
         print("COCO loaded splits:", list(self.train_loaders.keys()))
 
@@ -179,10 +182,12 @@ class Trainer:
             steps = len(self.train_loaders["paired"])
 
             for sampler in self.samplers: sampler.set_epoch(epoch)
+            self.val_sampler.set_epoch(epoch)
 
             metrics = {k: SmoothedValue() for k in λ}
-            
-            for _ in (pbar := tqdm(range(steps), desc=f"Epoch {epoch}")):
+        
+            pbar = trange(steps, desc=f"Epoch {epoch}") if (int(os.environ["LOCAL_RANK"]) == 0) else range(steps) 
+            for _ in pbar:
                 self.opt.zero_grad(set_to_none=True)
                 total_loss = 0.0
 
@@ -195,7 +200,6 @@ class Trainer:
                 )
                 loss_clip = clip_contrastive_loss(out["z_img"], out["z_txt"])
                 total_loss += λ["clip"] * loss_clip
-                # epoch_losses["clip"] += loss_clip.item()
                 metrics["clip"].update(loss_clip.item())
 
                 # Unpaired OT 
@@ -228,7 +232,6 @@ class Trainer:
                         loss_ot = sinkhorn_ot_loss(z_img, z_txt)
 
                     total_loss += λ["ot"] * loss_ot
-                    # epoch_losses["ot"] += loss_ot.item()
                     metrics["ot"].update(loss_ot.item())
 
                 # Text-only MLM 
@@ -240,7 +243,6 @@ class Trainer:
                         labels=b["input_ids"].to(self.device),
                     )
                     total_loss += λ["mlm"] * loss_mlm
-                    # epoch_losses["mlm"] += loss_mlm.item()
                     metrics["mlm"].update(loss_mlm.item())
 
                 # Image-only MAE 
@@ -249,17 +251,17 @@ class Trainer:
                     out = self.model(images=b["image"].to(self.device))
                     loss_mae = self.mae_loss_fn(out["pred_patches"], out["target_patches"], out["mask"])
                     total_loss += λ["mae"] * loss_mae
-                    # epoch_losses["mae"] += loss_mae.item()
                     metrics["mae"].update(loss_mae.item())
 
                 total_loss.backward()
                 self.opt.step()
-                pbar.set_postfix({"mae": loss_mae.item(),
-                                  "clip": loss_clip.item(),
-                                  "ot": loss_ot.item(),
-                                  "mlm": loss_mlm.item()})
+                if (int(os.environ["LOCAL_RANK"]) == 0):
+                    pbar.set_postfix({"mae": loss_mae.item(),
+                                    "clip": loss_clip.item() if λ["ot"] > 0 else 0.0,
+                                    "ot": loss_ot.item() if λ["mlm"] > 0 else 0.0,
+                                    "mlm": loss_mlm.item() if λ["mae"] > 0 else 0.0,})
                 
-                torch.cuda.synchronize()
+                dist.barrier(device_ids = [self.device])
 
 
             # avg = {k: v / steps for k, v in epoch_losses.items()}
@@ -270,15 +272,27 @@ class Trainer:
 
             print(f"Epoch {epoch} | Losses: {avg}")
 
-            if (epoch % 10 == 0 or epoch == self.args.epochs) and (int(os.environ["LOCAL_RANK"]) == 0):
-                ckpt_path = os.path.join(self.args.save_dir, f"epoch_{epoch}.pt")
-                torch.save(self.model.state_dict(), ckpt_path)
-                print(f"Saved checkpoint: {ckpt_path}")
+            if (epoch % self.args.eval_every == 0):
+                score, metrics = self.evaluate(epoch) 
 
-            if (epoch % self.args.eval_every == 0) and (int(os.environ["LOCAL_RANK"]) == 0):
-                self.evaluate(epoch)
+                if (int(os.environ["LOCAL_RANK"]) == 0):
+                    # Save best model
+                    if score > self.best_score:
+                        self.best_score = score
+                        self.early_stop_counter = 0
+                            best_path = os.path.join(self.args.save_dir, "best.pt")
+                            torch.save(self.model.state_dict(), best_path)
+                            print(f"New best model saved at epoch {epoch} (score {score:.4f})")
+
+                    else:
+                        self.early_stop_counter += 1
+                        print(f"No improvement. Early stop counter = {self.early_stop_counter}")
+
+                        if self.early_stop_counter >= self.args.patience:
+                            print("Early stopping triggered!")
+                            return
             
-            torch.cuda.synchronize()
+            dist.barrier(device_ids = [self.device])
 
         cleanup()
 
@@ -298,7 +312,11 @@ class Trainer:
         z_img = torch.cat(imgs)
         z_txt = torch.cat(txts)
         metrics = retrieval_accuracy(z_img, z_txt)
-        print(f"[Epoch {epoch}] Validation retrieval: {metrics}")
+        if (int(os.environ["LOCAL_RANK"]) == 0):
+            print(f"\n[Epoch {epoch}] Validation retrieval: {metrics}\n")
+
+        score = 0.5 * (metrics["i2t@1"] + metrics["t2i@1"])
+        return score, metrics
 
 
 if __name__ == "__main__":
@@ -330,6 +348,9 @@ if __name__ == "__main__":
     parser.add_argument("--use_anchored_ot", action="store_true")
     parser.add_argument("--alpha_anchor", type=float, default=0.1)
     parser.add_argument("--use_gw_ot", action="store_true")
+
+     # Early stopping
+    parser.add_argument("--patience", type=int, default=5)
 
     args = parser.parse_args()
     trainer = Trainer(args)

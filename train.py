@@ -216,20 +216,10 @@ class Trainer:
 
                 total_loss.backward()
                 self.opt.step()
-<<<<<<< HEAD
                 pbar.set_postfix({"mae": loss_mae.item(),
-                                  "clip": loss_clip.item(),
-                                  "ot": loss_ot.item(),
-                                  "mlm": loss_mlm.item()})
-=======
-
-                pbar.set_postfix({
-                    "CLIP": loss_clip.item(),
-                    "OT": loss_ot.item() if λ["ot"] > 0 else 0.0,
-                    "MLM": loss_mlm.item() if λ["mlm"] > 0 else 0.0,
-                    "MAE": loss_mae.item() if λ["mae"] > 0 else 0.0,
-                })
->>>>>>> refs/remotes/origin/main
+                                  "clip": loss_clip.item() if λ["ot"] > 0 else 0.0,
+                                  "ot": loss_ot.item() if λ["mlm"] > 0 else 0.0,
+                                  "mlm": loss_mlm.item() if λ["mae"] > 0 else 0.0,})
 
             avg = {k: v / steps for k, v in epoch_losses.items()}
             print(f"Epoch {epoch} | Losses: {avg}")
@@ -269,7 +259,7 @@ class Trainer:
 
         z_img = torch.cat(imgs)
         z_txt = torch.cat(txts)
-        metrics = retrieval_accuracy(z_img, z_txt)
+        metrics = retrieval_accuracy(z_img, z_txt, self.device)
         print(f"[Epoch {epoch}] Validation retrieval: {metrics}")
 
         score = 0.5 * (metrics["i2t@1"] + metrics["t2i@1"])
