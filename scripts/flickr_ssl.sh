@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -p 3090-gcondo
+#SBATCH -p rsingh47-gcondo
 #SBATCH --job-name=FlickrSSL
 #SBATCH --output=logs/flickr_ssl_%j.out
 #SBATCH --error=logs/flickr_ssl_%j.err
@@ -58,5 +58,17 @@ python train.py \
   --lambda_clip 1.0 --lambda_ot 0.5 --lambda_mlm 1.0 --lambda_mae 1.0 \
   --use_gw_ot \
   --save_dir checkpoints/flickr_gw_ot_20p
+
+python train.py \
+  --epochs 30 --batch_size 16 --lr 1e-4 --eval_every 1 \
+  --paired_fraction 0.2 \
+  --lambda_clip 1.0 --lambda_ot 0.0 --lambda_mlm 0.0 --lambda_mae 0.0 \
+  --save_dir checkpoints/flickr_pureclip_20p
+
+python train.py \
+  --epochs 30 --batch_size 16 --lr 1e-4 --eval_every 1 \
+  --paired_fraction 1.0 \
+  --lambda_clip 1.0 --lambda_ot 0.0 --lambda_mlm 0.0 --lambda_mae 0.0 \
+  --save_dir checkpoints/flickr_pureclip_100p
 
 echo "=== Done! Check logs/flickr_ssl_${SLURM_JOB_ID}.out ==="

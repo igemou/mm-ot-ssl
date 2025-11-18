@@ -40,8 +40,10 @@ class Trainer:
         data_fns[args.dataset]()
         os.makedirs(args.save_dir, exist_ok=True)
 
+        self.best_score = -1
+        self.early_stop_counter = 0
+
     def _build_flickr_datasets(self):
-        """Build datasets, skipping empty splits safely."""
         print("Building Flickr30k datasets...")
 
         requested = ["paired", "unpaired", "text_only", "image_only"]
@@ -73,7 +75,6 @@ class Trainer:
         if "paired" not in self.train_loaders:
             raise RuntimeError("ERROR: 'paired' dataset cannot be empty.")
 
-        # Validation split
         self.val_loader = DataLoader(
             FlickrMultiModalDataset(split="paired", paired_fraction=0.1, train=False),
             batch_size=self.args.batch_size,
@@ -83,8 +84,8 @@ class Trainer:
 
         print("Flickr30k loaded splits:", list(self.train_loaders.keys()))
 
+
     def _build_coco_datasets(self):
-        """Build datasets, skipping empty splits safely."""
         print("Building COCO datasets...")
 
         requested = ["paired", "unpaired", "text_only", "image_only"]
@@ -116,7 +117,6 @@ class Trainer:
         if "paired" not in self.train_loaders:
             raise RuntimeError("ERROR: 'paired' dataset cannot be empty.")
 
-        # Validation split
         self.val_loader = DataLoader(
             COCOMultiModalDataset(split="paired", paired_fraction=0.1, train=False),
             batch_size=self.args.batch_size,
@@ -127,7 +127,7 @@ class Trainer:
         print("COCO loaded splits:", list(self.train_loaders.keys()))
 
     def _next(self, name):
-        """Safely fetch next batch (restarts iterator if exhausted)."""
+        """Safely fetch next batch."""
         try:
             return next(self.iters[name])
         except StopIteration:
@@ -148,7 +148,6 @@ class Trainer:
             epoch_losses = {k: 0.0 for k in λ}
             steps = len(self.train_loaders["paired"])
 
-            
             for _ in (pbar := tqdm(range(steps), desc=f"Epoch {epoch}")):
                 self.opt.zero_grad(set_to_none=True)
                 total_loss = 0.0
@@ -164,7 +163,7 @@ class Trainer:
                 total_loss += λ["clip"] * loss_clip
                 epoch_losses["clip"] += loss_clip.item()
 
-                # Unpaired OT 
+                # Unpaired OT
                 if "unpaired" in self.train_loaders and λ["ot"] > 0:
                     b = self._next("unpaired")
                     out = self.model(
@@ -196,7 +195,7 @@ class Trainer:
                     total_loss += λ["ot"] * loss_ot
                     epoch_losses["ot"] += loss_ot.item()
 
-                # Text-only MLM 
+                # Text MLM
                 if "text_only" in self.train_loaders and λ["mlm"] > 0:
                     b = self._next("text_only")
                     loss_mlm = self.mlm_loss_fn(
@@ -207,7 +206,7 @@ class Trainer:
                     total_loss += λ["mlm"] * loss_mlm
                     epoch_losses["mlm"] += loss_mlm.item()
 
-                # Image-only MAE 
+                # Image MAE
                 if "image_only" in self.train_loaders and λ["mae"] > 0:
                     b = self._next("image_only")
                     out = self.model(images=b["image"].to(self.device))
@@ -217,21 +216,43 @@ class Trainer:
 
                 total_loss.backward()
                 self.opt.step()
+<<<<<<< HEAD
                 pbar.set_postfix({"mae": loss_mae.item(),
                                   "clip": loss_clip.item(),
                                   "ot": loss_ot.item(),
                                   "mlm": loss_mlm.item()})
+=======
+
+                pbar.set_postfix({
+                    "CLIP": loss_clip.item(),
+                    "OT": loss_ot.item() if λ["ot"] > 0 else 0.0,
+                    "MLM": loss_mlm.item() if λ["mlm"] > 0 else 0.0,
+                    "MAE": loss_mae.item() if λ["mae"] > 0 else 0.0,
+                })
+>>>>>>> refs/remotes/origin/main
 
             avg = {k: v / steps for k, v in epoch_losses.items()}
             print(f"Epoch {epoch} | Losses: {avg}")
 
-            if epoch % 10 == 0 or epoch == self.args.epochs:
-                ckpt_path = os.path.join(self.args.save_dir, f"epoch_{epoch}.pt")
-                torch.save(self.model.state_dict(), ckpt_path)
-                print(f"Saved checkpoint: {ckpt_path}")
-
             if epoch % self.args.eval_every == 0:
-                self.evaluate(epoch)
+                score, metrics = self.evaluate(epoch)
+
+                # Save best model
+                if score > self.best_score:
+                    self.best_score = score
+                    self.early_stop_counter = 0
+                    best_path = os.path.join(self.args.save_dir, "best.pt")
+                    torch.save(self.model.state_dict(), best_path)
+                    print(f"New best model saved at epoch {epoch} (score {score:.4f})")
+
+                else:
+                    self.early_stop_counter += 1
+                    print(f"No improvement. Early stop counter = {self.early_stop_counter}")
+
+                    if self.early_stop_counter >= self.args.patience:
+                        print("Early stopping triggered!")
+                        return
+
 
     def evaluate(self, epoch):
         self.model.eval()
@@ -251,16 +272,18 @@ class Trainer:
         metrics = retrieval_accuracy(z_img, z_txt)
         print(f"[Epoch {epoch}] Validation retrieval: {metrics}")
 
+        score = 0.5 * (metrics["i2t@1"] + metrics["t2i@1"])
+        return score, metrics
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Anchored/GW MultiModal SSL Pretraining (Flickr30k)")
+    parser = argparse.ArgumentParser(description="Anchored/GW MM-SSL Pretraining")
 
     # Model
     parser.add_argument("--vision_name", type=str, default="vit_base_patch16_224")
     parser.add_argument("--text_name", type=str, default="bert-base-uncased")
     parser.add_argument("--shared_dim", type=int, default=256)
 
-    #Dataset
+    # Dataset
     parser.add_argument("--dataset", type=str, choices=["flickr", "coco"], default="flickr")
 
     # Training
@@ -281,6 +304,9 @@ if __name__ == "__main__":
     parser.add_argument("--use_anchored_ot", action="store_true")
     parser.add_argument("--alpha_anchor", type=float, default=0.1)
     parser.add_argument("--use_gw_ot", action="store_true")
+
+    # Early stopping
+    parser.add_argument("--patience", type=int, default=5)
 
     args = parser.parse_args()
     trainer = Trainer(args)

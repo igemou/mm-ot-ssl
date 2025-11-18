@@ -2,7 +2,7 @@
 
 #SBATCH --partition=gpu 
 #SBATCH --nodes=2
-#SBATCH --ntasks-per-node=1
+#SBATCH --ntasks-per-node=1 --cpus-per-task=4
 #SBATCH --output=logs/coco_ssl_ddp_%j.out
 #SBATCH -t 10:00:00
 #SBATCH --mem=50g
