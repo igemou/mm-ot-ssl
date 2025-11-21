@@ -280,9 +280,13 @@ class Trainer:
                     if score > self.best_score:
                         self.best_score = score
                         self.early_stop_counter = 0
-                            best_path = os.path.join(self.args.save_dir, "best.pt")
-                            torch.save(self.model.state_dict(), best_path)
-                            print(f"New best model saved at epoch {epoch} (score {score:.4f})")
+                        best_path = os.path.join(self.args.save_dir, "best.pt")
+                        torch.save(self.model.state_dict(), best_path)
+                        print(f"New best model saved at epoch {epoch} (score {score:.4f})")
+
+                        with open(os.path.join(self.args.save_dir, "results.txt"), "w") as f:
+                            f.write(args.desc)
+                            f.write(f"Epoch: {epoch}, metrics: {metrics}")
 
                     else:
                         self.early_stop_counter += 1
@@ -351,6 +355,7 @@ if __name__ == "__main__":
 
      # Early stopping
     parser.add_argument("--patience", type=int, default=5)
+    parser.add_argument("--desc", type="str")
 
     args = parser.parse_args()
     trainer = Trainer(args)

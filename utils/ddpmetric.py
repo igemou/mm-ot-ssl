@@ -155,6 +155,6 @@ def retrieval_accuracy(z_img, z_txt, device, topk=(1, 5)):
     for _, meter in results.items():
         meter.synchronize_between_processes(device_ids=[device])
 
-    avg = {k: meter.global_avg for k, meter in metrics.items()}
+    avg = {k: meter.global_avg for k, meter in results.items()}
 
     return avg
