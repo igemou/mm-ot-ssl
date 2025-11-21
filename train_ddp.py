@@ -284,7 +284,7 @@ class Trainer:
                         torch.save(self.model.state_dict(), best_path)
                         print(f"New best model saved at epoch {epoch} (score {score:.4f})")
 
-                        with open(os.path.join(self.args.save_dir, "results.txt"), "w") as f:
+                        with open(os.path.join(self.args.desc_dir, "results.txt"), "w") as f:
                             f.write(args.desc)
                             f.write(f"Epoch: {epoch}, metrics: {metrics}")
 
@@ -355,6 +355,7 @@ if __name__ == "__main__":
 
      # Early stopping
     parser.add_argument("--patience", type=int, default=5)
+    parser.add_argument("--desc_dir", type="str")
     parser.add_argument("--desc", type="str")
 
     args = parser.parse_args()

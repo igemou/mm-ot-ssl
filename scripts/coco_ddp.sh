@@ -29,7 +29,7 @@ cd /users/bjoo2/code/anchor/
 #   --lambda_ot 0.5 \
 #   --lambda_mlm 1.0 \
 #   --lambda_mae 1.0 \
-#   --save_dir /users/bjoo2/scratch/checkpoints/coco_plain_ot
+#   --save_dir /users/bjoo2/scratch/anchor/checkpoints/coco_plain_ot
 
 # python train.py \
 #   --dataset coco\
@@ -37,7 +37,7 @@ cd /users/bjoo2/code/anchor/
 #     --batch_size 16 \
 #     --lr 1e-4 \
 #     --eval_every 1 \
-#     --save_dir /users/bjoo2/scratch/checkpoints/coco_anchored_ot \
+#     --save_dir /users/bjoo2/scratch/anchor/checkpoints/coco_anchored_ot \
 #     --paired_fraction 0.2 \
 #     --lambda_clip 1.0 \
 #     --lambda_ot 0.2 \
@@ -51,14 +51,14 @@ cd /users/bjoo2/code/anchor/
 #   --epochs 30 --batch_size 16 --lr 1e-4 --eval_every 1 \
 #   --paired_fraction 0.2 \
 #   --lambda_clip 1.0 --lambda_ot 0.0 --lambda_mlm 1.0 --lambda_mae 1.0 \
-#   --save_dir /users/bjoo2/scratch/checkpoints/coco_clip_20p
+#   --save_dir /users/bjoo2/scratch/anchor/checkpoints/coco_clip_20p
 
 # python train.py \
 #   --dataset coco\
 #   --epochs 30 --batch_size 16 --lr 1e-4 --eval_every 1 \
 #   --paired_fraction 1.0 \
 #   --lambda_clip 1.0 --lambda_ot 0.0 --lambda_mlm 1.0 --lambda_mae 1.0 \
-#   --save_dir /users/bjoo2/scratch/checkpoints/coco_clip_100p
+#   --save_dir /users/bjoo2/scratch/anchor/checkpoints/coco_clip_100p
 
 echo "Pretraining on COCO"
 srun torchrun \
@@ -73,7 +73,8 @@ srun torchrun \
     --paired_fraction 0.2 \
     --lambda_clip 1.0 --lambda_ot 0.5 --lambda_mlm 1.0 --lambda_mae 1.0 \
     --use_gw_ot \
-    --save_dir /users/bjoo2/scratch/checkpoints/coco_gw_ot_20p \
+    --save_dir /users/bjoo2/scratch/anchor/checkpoints/coco_gw_ot_20p \
+    --desc_dir /users/bjoo2/scratch/anchor/\
     --desc gw_ot_full
 
 echo "=== Done! Check logs/coco_ssl_${SLURM_JOB_ID}.out ==="
