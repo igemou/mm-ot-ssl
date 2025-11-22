@@ -21,6 +21,7 @@ from utils.losses import (
 from utils.ddpmetric import SmoothedValue, retrieval_accuracy
 
 def setup(model):
+    print(f"Num Avail Devices: {torch.accelerator.device_count()}")
     torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
     acc = torch.accelerator.current_accelerator()
     backend = torch.distributed.get_default_backend_for_device(acc)
@@ -88,7 +89,7 @@ class Trainer:
             loader = DataLoader(
                 dataset,
                 batch_size=self.args.batch_size,
-                shuffle=True,
+                shuffle=not ddp,
                 num_workers=4,
                 drop_last=True,
                 sampler=sampler,
@@ -135,7 +136,7 @@ class Trainer:
             loader = DataLoader(
                 dataset,
                 batch_size=self.args.batch_size,
-                shuffle=True,
+                shuffle=not ddp,
                 num_workers=4,
                 drop_last=True,
                 sampler=sampler,
@@ -181,7 +182,7 @@ class Trainer:
             # epoch_losses = {k: 0.0 for k in λ}
             steps = len(self.train_loaders["paired"])
 
-            for sampler in self.samplers: sampler.set_epoch(epoch)
+            for mode in self.samplers: self.samplers[mode].set_epoch(epoch)
             self.val_sampler.set_epoch(epoch)
 
             metrics = {k: SmoothedValue() for k in λ}
@@ -324,6 +325,7 @@ class Trainer:
 
 
 if __name__ == "__main__":
+    torch.autograd.set_detect_anomaly(True)
     parser = argparse.ArgumentParser(description="Anchored/GW MultiModal SSL Pretraining (Flickr30k)")
 
     # Model
@@ -355,8 +357,8 @@ if __name__ == "__main__":
 
      # Early stopping
     parser.add_argument("--patience", type=int, default=5)
-    parser.add_argument("--desc_dir", type="str")
-    parser.add_argument("--desc", type="str")
+    parser.add_argument("--desc_dir", type=str)
+    parser.add_argument("--desc", type=str)
 
     args = parser.parse_args()
     trainer = Trainer(args)
