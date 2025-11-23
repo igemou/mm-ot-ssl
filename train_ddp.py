@@ -8,7 +8,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from tqdm import trange
 
-from models.mm_model import MultiModalModel
+from models.mm_model_ddp import DDPMultiModalModel
 from data import FlickrMultiModalDataset, COCOMultiModalDataset
 from utils.losses import (
     clip_contrastive_loss,
@@ -21,18 +21,20 @@ from utils.losses import (
 from utils.ddpmetric import SmoothedValue, retrieval_accuracy
 
 def setup(model):
-    print(f"Num Avail Devices: {torch.accelerator.device_count()}")
     torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
     acc = torch.accelerator.current_accelerator()
     backend = torch.distributed.get_default_backend_for_device(acc)
     dist.init_process_group(backend)
     rank = dist.get_rank()
     print(f"Start running basic DDP example on rank {rank}.")
+    print(f"[rank {rank}] Num Avail Devices: {torch.accelerator.device_count()}")
 
     # create model and move it to GPU with id rank
     device_id = rank % torch.accelerator.device_count()
+    model.device = device_id
     model = model.to(device_id)
-    model = DDP(model, device_ids=[device_id])
+    model.mlm_loss_fn = model.mlm_loss_fn.to(device_id)
+    model = DDP(model, device_ids=[device_id], find_unused_parameters=True)
     return model, device_id
 
 def cleanup():
@@ -44,18 +46,18 @@ class Trainer:
 
     def __init__(self, args):
         self.args = args
-        model = MultiModalModel(
+        model = DDPMultiModalModel(
             vision_name=args.vision_name,
             text_name=args.text_name,
             shared_dim=args.shared_dim,
         )
         self.model, self.device = setup(model)
+        print(f"[rank {int(os.environ["LOCAL_RANK"])}] Model Setup")
 
         self.opt = torch.optim.AdamW(self.model.parameters(), lr=args.lr, weight_decay=1e-4)
-        self.mlm_loss_fn = mlm_loss(model_name=args.text_name)
-        self.mae_loss_fn = MAE_loss()
+        print(hasattr(self.model, "mlm_loss_fn"))
 
-        print(f"Dataset: {args.dataset}")
+        print(f"[rank {int(os.environ["LOCAL_RANK"])}] Dataset: {args.dataset}")
 
         data_fns = {"flickr": self._build_flickr_datasets,
                     "coco": self._build_coco_datasets}
@@ -189,83 +191,24 @@ class Trainer:
         
             pbar = trange(steps, desc=f"Epoch {epoch}") if (int(os.environ["LOCAL_RANK"]) == 0) else range(steps) 
             for _ in pbar:
-                self.opt.zero_grad(set_to_none=True)
-                total_loss = 0.0
+                self.opt.zero_grad()
 
-                # Paired CLIP loss
-                b = self._next("paired")
-                out = self.model(
-                    images=b["image"].to(self.device),
-                    input_ids=b["input_ids"].to(self.device),
-                    attention_mask=b["attention_mask"].to(self.device),
-                )
-                loss_clip = clip_contrastive_loss(out["z_img"], out["z_txt"])
-                total_loss += λ["clip"] * loss_clip
-                metrics["clip"].update(loss_clip.item())
+                paired_batch = self._next("paired")
+                unpaired_batch = self._next("unpaired")
+                text_batch = self._next("text_only")
+                img_batch = self._next("image_only")
+                ot = "sinkhorn"
+                if self.args.use_anchored_ot: ot = "anchored"
+                elif self.args.use_gw_ot: ot = "gw"
+                preds, total_loss, loss_dict = self.model(paired_batch, unpaired_batch, text_batch, img_batch, ot_loss=ot, λ=λ)
+                if (int(os.environ["LOCAL_RANK"]) == 0): pbar.set_postfix(loss_dict)
 
-                # Unpaired OT 
-                if "unpaired" in self.train_loaders and λ["ot"] > 0:
-                    b = self._next("unpaired")
-                    out = self.model(
-                        images=b["image"].to(self.device),
-                        input_ids=b["input_ids"].to(self.device),
-                        attention_mask=b["attention_mask"].to(self.device),
-                    )
-                    z_img, z_txt = out["z_img"], out["z_txt"]
-
-                    if self.args.use_anchored_ot:
-                        b_p = self._next("paired")
-                        images = torch.cat([b_p["image"], b["image"]], dim=0).to(self.device)
-                        input_ids = torch.cat([b_p["input_ids"], b["input_ids"]], dim=0).to(self.device)
-                        attn_mask = torch.cat([b_p["attention_mask"], b["attention_mask"]], dim=0).to(self.device)
-
-                        out = self.model(images=images, input_ids=input_ids, attention_mask=attn_mask)
-                        z_img, z_txt = out["z_img"], out["z_txt"]
-
-                        n_paired = len(b_p["image"])
-                        anchors = [(i, i) for i in range(n_paired)]
-                        loss_ot = anchored_ot_loss(
-                            z_img, z_txt, paired_indices=anchors, alpha=self.args.alpha_anchor
-                        )
-                    elif self.args.use_gw_ot:
-                        loss_ot = gromov_wasserstein_loss(z_img, z_txt)
-                    else:
-                        loss_ot = sinkhorn_ot_loss(z_img, z_txt)
-
-                    total_loss += λ["ot"] * loss_ot
-                    metrics["ot"].update(loss_ot.item())
-
-                # Text-only MLM 
-                if "text_only" in self.train_loaders and λ["mlm"] > 0:
-                    b = self._next("text_only")
-                    loss_mlm = self.mlm_loss_fn(
-                        input_ids=b["input_ids"].to(self.device),
-                        attention_mask=b["attention_mask"].to(self.device),
-                        labels=b["input_ids"].to(self.device),
-                    )
-                    total_loss += λ["mlm"] * loss_mlm
-                    metrics["mlm"].update(loss_mlm.item())
-
-                # Image-only MAE 
-                if "image_only" in self.train_loaders and λ["mae"] > 0:
-                    b = self._next("image_only")
-                    out = self.model(images=b["image"].to(self.device))
-                    loss_mae = self.mae_loss_fn(out["pred_patches"], out["target_patches"], out["mask"])
-                    total_loss += λ["mae"] * loss_mae
-                    metrics["mae"].update(loss_mae.item())
+                for loss_name, loss_val in loss_dict.items():
+                    metrics[loss_name].update(loss_val)
 
                 total_loss.backward()
                 self.opt.step()
-                if (int(os.environ["LOCAL_RANK"]) == 0):
-                    pbar.set_postfix({"mae": loss_mae.item(),
-                                    "clip": loss_clip.item() if λ["ot"] > 0 else 0.0,
-                                    "ot": loss_ot.item() if λ["mlm"] > 0 else 0.0,
-                                    "mlm": loss_mlm.item() if λ["mae"] > 0 else 0.0,})
-                
-                dist.barrier(device_ids = [self.device])
 
-
-            # avg = {k: v / steps for k, v in epoch_losses.items()}
             for _, meter in metrics.items():
                 meter.synchronize_between_processes(device_ids=[self.device])
 

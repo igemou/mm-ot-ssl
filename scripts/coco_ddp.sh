@@ -4,7 +4,7 @@
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1 --cpus-per-task=4
 #SBATCH --output=logs/coco_ssl_ddp_%j.out
-#SBATCH -t 00:05:00
+#SBATCH -t 02:00:00
 #SBATCH --mem=50g
 
 export MASTER_ADDR=$(scontrol show hostname $SLURM_NODELIST | head -n 1) 
@@ -60,8 +60,6 @@ cd /users/bjoo2/code/anchor/
 #   --lambda_clip 1.0 --lambda_ot 0.0 --lambda_mlm 1.0 --lambda_mae 1.0 \
 #   --save_dir /users/bjoo2/scratch/anchor/checkpoints/coco_clip_100p
 
-nvidia-smi
-
 echo "Pretraining on COCO"
 srun torchrun \
   --nnodes=2 \
@@ -71,7 +69,7 @@ srun torchrun \
   --rdzv_endpoint=$MASTER_ADDR:29400 \
   train_ddp.py \
     --dataset coco\
-    --epochs 30 --batch_size 32 --lr 1e-4 --eval_every 1 \
+    --epochs 30 --batch_size 16 --lr 1e-4 --eval_every 1 \
     --paired_fraction 0.2 \
     --lambda_clip 1.0 --lambda_ot 0.5 --lambda_mlm 1.0 --lambda_mae 1.0 \
     --use_gw_ot \
