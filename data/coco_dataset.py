@@ -32,13 +32,10 @@ class COCOMultiModalDataset(Dataset):
         # Load the dataset
 
         data_path = "/users/bjoo2/scratch/coco"
+        split_string = "train" if train else "val"
         
-        if train:
-            self.dataset = datasets.CocoCaptions(root=f"{data_path}/train2014", 
-                                  annFile=f"{data_path}/annotations/captions_train2014.json")
-        else:
-            self.dataset = datasets.CocoCaptions(root=f"{data_path}/val2014", 
-                                  annFile=f"{data_path}/annotations/captions_val2014.json")
+        self.dataset = datasets.CocoCaptions(root=f"{data_path}/{split_string}2014", 
+                                             annFile=f"{data_path}/annotations/captions_{split_string}2014.json")
 
         # Create paired/unpaired index partitions
         n_total = len(self.dataset)
