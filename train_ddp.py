@@ -55,7 +55,6 @@ class Trainer:
         print(f"[rank {int(os.environ["LOCAL_RANK"])}] Model Setup")
 
         self.opt = torch.optim.AdamW(self.model.parameters(), lr=args.lr, weight_decay=1e-4)
-        print(hasattr(self.model, "mlm_loss_fn"))
 
         print(f"[rank {int(os.environ["LOCAL_RANK"])}] Dataset: {args.dataset}")
 
@@ -153,7 +152,7 @@ class Trainer:
 
         # Validation split
         dataset = COCOMultiModalDataset(split="paired", paired_fraction=0.1, train=False)
-        self.val_sampler = DistributedSampler(dataset) if ddp else None
+        self.val_sampler = DistributedSampler(dataset, shuffle=False) if ddp else None
         self.val_loader = DataLoader(dataset,
                                       batch_size=self.args.batch_size,
                                       shuffle=False,

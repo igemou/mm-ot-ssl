@@ -1,13 +1,13 @@
-mkdir -p ~/datasets/coco && cd ~/datasets/coco
+mkdir -p ~/scratch/coco && cd ~/scratch/coco
 
-wget http://images.cocodataset.org/zips/train2017.zip
-wget http://images.cocodataset.org/zips/val2017.zip
+wget http://images.cocodataset.org/zips/train2014.zip
+wget http://images.cocodataset.org/zips/val2014.zip
 
-wget http://images.cocodataset.org/annotations/annotations_trainval2017.zip
+wget http://images.cocodataset.org/annotations/annotations_trainval2014.zip
 
-unzip train2017.zip
-unzip val2017.zip
-unzip annotations_trainval2017.zip
+unzip train2014.zip
+unzip val2014.zip
+unzip annotations_trainval2014.zip
 
 # Data will take around 20GBs disk space
 # train2017 and val2027 just have images in them
