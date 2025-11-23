@@ -6,7 +6,7 @@ from torch import optim
 import torch.distributed as dist 
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from tqdm import trange
+from tqdm import trange, tqdm
 
 from models.mm_model_ddp import DDPMultiModalModel
 from data import FlickrMultiModalDataset, COCOMultiModalDataset
@@ -246,7 +246,8 @@ class Trainer:
         self.model.eval()
         imgs, txts = [], []
         with torch.no_grad():
-            for batch in self.val_loader:
+            val_loader = tqdm(self.val_loaders, desc=f"Val Epoch {epoch}") if (int(os.environ["LOCAL_RANK"]) == 0) else self.val_loader 
+            for batch in val_loader:
                 z_img = self.model.image_embed(batch["image"].to(self.device))
                 z_txt = self.model.text_embed(
                     batch["input_ids"].to(self.device),
