@@ -157,7 +157,7 @@ class Trainer:
         self.val_loader = DataLoader(dataset,
                                       batch_size=self.args.batch_size,
                                       shuffle=False,
-                                      num_workers=4,
+                                      num_workers=1,
                                       sampler=sampler)
 
         print("COCO loaded splits:", list(self.train_loaders.keys()))
@@ -181,11 +181,9 @@ class Trainer:
 
         for epoch in range(1, self.args.epochs + 1):
             self.model.train()
-            # epoch_losses = {k: 0.0 for k in λ}
             steps = len(self.train_loaders["paired"])
 
             for mode in self.samplers: self.samplers[mode].set_epoch(epoch)
-            self.val_sampler.set_epoch(epoch)
 
             metrics = {k: SmoothedValue() for k in λ}
         
@@ -200,7 +198,7 @@ class Trainer:
                 ot = "sinkhorn"
                 if self.args.use_anchored_ot: ot = "anchored"
                 elif self.args.use_gw_ot: ot = "gw"
-                preds, total_loss, loss_dict = self.model(paired_batch, unpaired_batch, text_batch, img_batch, ot_loss=ot, λ=λ)
+                _, total_loss, loss_dict = self.model(paired_batch, unpaired_batch, text_batch, img_batch, ot_loss=ot, λ=λ)
                 if (int(os.environ["LOCAL_RANK"]) == 0): pbar.set_postfix(loss_dict)
 
                 for loss_name, loss_val in loss_dict.items():
