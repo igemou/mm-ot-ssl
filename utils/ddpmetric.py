@@ -132,7 +132,7 @@ def retrieval_accuracy(z_img, z_txt, device, topk=(1, 5)):
     Computes retrieval accuracy for image→text and text→image directions.
     """
     sim = cosine_similarity(z_img, z_txt)
-    labels = torch.arange(z_img.size(0), device=z_img.device)
+    labels = torch.arange(z_img.size(0), device=device)
     results = {}
     for k in topk:
         results[f"i2t@{k}"] = SmoothedValue()

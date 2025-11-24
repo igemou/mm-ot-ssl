@@ -60,7 +60,7 @@ cd /users/bjoo2/code/anchor/
 #   --lambda_clip 1.0 --lambda_ot 0.0 --lambda_mlm 1.0 --lambda_mae 1.0 \
 #   --save_dir /users/bjoo2/scratch/anchor/checkpoints/coco_clip_100p
 
-echo "Pretraining on COCO"
+echo "Running GW OT on COCO"
 srun torchrun \
   --nnodes=2 \
   --nproc_per_node=1 \

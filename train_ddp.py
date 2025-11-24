@@ -1,5 +1,6 @@
 import os
 import argparse
+import builtins
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
 from torch import optim
@@ -20,14 +21,17 @@ from utils.losses import (
 )
 from utils.ddpmetric import SmoothedValue, retrieval_accuracy
 
+def print(*args, **kwargs):
+    builtins.print(f"[rank {dist.get_rank()}]", *args, **kwargs)
+
 def setup(model):
     torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
     acc = torch.accelerator.current_accelerator()
     backend = torch.distributed.get_default_backend_for_device(acc)
     dist.init_process_group(backend)
     rank = dist.get_rank()
-    print(f"Start running basic DDP example on rank {rank}.")
-    print(f"[rank {rank}] Num Avail Devices: {torch.accelerator.device_count()}")
+    print(f"Start running DDP on rank {rank}.")
+    print(f"Num Avail Devices: {torch.accelerator.device_count()}")
 
     # create model and move it to GPU with id rank
     device_id = rank % torch.accelerator.device_count()
@@ -52,11 +56,11 @@ class Trainer:
             shared_dim=args.shared_dim,
         )
         self.model, self.device = setup(model)
-        print(f"[rank {int(os.environ["LOCAL_RANK"])}] Model Setup")
+        print(f"Model Setup Done")
 
         self.opt = torch.optim.AdamW(self.model.parameters(), lr=args.lr, weight_decay=1e-4)
 
-        print(f"[rank {int(os.environ["LOCAL_RANK"])}] Dataset: {args.dataset}")
+        print(f"Dataset: {args.dataset}")
 
         data_fns = {"flickr": self._build_flickr_datasets,
                     "coco": self._build_coco_datasets}
@@ -151,13 +155,13 @@ class Trainer:
             raise RuntimeError("ERROR: 'paired' dataset cannot be empty.")
 
         # Validation split
-        dataset = COCOMultiModalDataset(split="paired", paired_fraction=0.1, train=False)
-        self.val_sampler = DistributedSampler(dataset, shuffle=False) if ddp else None
-        self.val_loader = DataLoader(dataset,
+        val_dataset = COCOMultiModalDataset(split="paired", paired_fraction=0.1, train=False)
+        self.val_sampler = DistributedSampler(val_dataset, shuffle=False) if ddp else None
+        self.val_loader = DataLoader(val_dataset,
                                       batch_size=self.args.batch_size,
                                       shuffle=False,
-                                      num_workers=1,
-                                      sampler=sampler)
+                                      num_workers=4,
+                                      sampler=self.val_sampler)
 
         print("COCO loaded splits:", list(self.train_loaders.keys()))
 
@@ -186,7 +190,7 @@ class Trainer:
 
             metrics = {k: SmoothedValue() for k in λ}
         
-            pbar = trange(steps, desc=f"Epoch {epoch}") if (int(os.environ["LOCAL_RANK"]) == 0) else range(steps) 
+            pbar = trange(steps, desc=f"Epoch {epoch}") if (dist.get_rank() == 0) else range(steps) 
             for _ in pbar:
                 self.opt.zero_grad()
 
@@ -198,7 +202,7 @@ class Trainer:
                 if self.args.use_anchored_ot: ot = "anchored"
                 elif self.args.use_gw_ot: ot = "gw"
                 _, total_loss, loss_dict = self.model(paired_batch, unpaired_batch, text_batch, img_batch, ot_loss=ot, λ=λ)
-                if (int(os.environ["LOCAL_RANK"]) == 0): pbar.set_postfix(loss_dict)
+                if (dist.get_rank() == 0): pbar.set_postfix(loss_dict)
 
                 for loss_name, loss_val in loss_dict.items():
                     metrics[loss_name].update(loss_val)
@@ -211,12 +215,12 @@ class Trainer:
 
             avg = {k: meter.global_avg for k, meter in metrics.items()}
 
-            print(f"Epoch {epoch} | Losses: {avg}")
+            if (dist.get_rank() == 0): print(f"Epoch {epoch} | Losses: {avg}")
 
             if (epoch % self.args.eval_every == 0):
                 score, metrics = self.evaluate(epoch) 
 
-                if (int(os.environ["LOCAL_RANK"]) == 0):
+                if (dist.get_rank() == 0):
                     # Save best model
                     if score > self.best_score:
                         self.best_score = score
@@ -235,6 +239,7 @@ class Trainer:
 
                         if self.early_stop_counter >= self.args.patience:
                             print("Early stopping triggered!")
+                            cleanup()
                             return
             
             dist.barrier(device_ids = [self.device])
@@ -245,10 +250,10 @@ class Trainer:
         self.model.eval()
         imgs, txts = [], []
         with torch.no_grad():
-            val_loader = tqdm(self.val_loaders, desc=f"Val Epoch {epoch}") if (int(os.environ["LOCAL_RANK"]) == 0) else self.val_loader 
+            val_loader = tqdm(self.val_loader, desc=f"Val Epoch {epoch}") if (dist.get_rank() == 0) else self.val_loader 
             for batch in val_loader:
-                z_img = self.model.image_embed(batch["image"].to(self.device))
-                z_txt = self.model.text_embed(
+                z_img = self.model.module.image_embed(batch["image"].to(self.device))
+                z_txt = self.model.module.text_embed(
                     batch["input_ids"].to(self.device),
                     batch["attention_mask"].to(self.device),
                 )
@@ -257,8 +262,8 @@ class Trainer:
 
         z_img = torch.cat(imgs)
         z_txt = torch.cat(txts)
-        metrics = retrieval_accuracy(z_img, z_txt)
-        if (int(os.environ["LOCAL_RANK"]) == 0):
+        metrics = retrieval_accuracy(z_img, z_txt, self.device)
+        if (dist.get_rank() == 0):
             print(f"\n[Epoch {epoch}] Validation retrieval: {metrics}\n")
 
         score = 0.5 * (metrics["i2t@1"] + metrics["t2i@1"])
