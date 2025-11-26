@@ -26,16 +26,19 @@ from timm.layers import trunc_normal_
 from utils.pos_embed import get_2d_sincos_pos_embed
 from utils.mae import patchify, unpatchify, random_masking
 
-from transformers import ViTMAEForPreTraining
+from transformers import ViTMAEForPreTraining, ViTMAEConfig, ViTMAEModel
 
 class PretrainedMAEDecoder(nn.Module):
     """
     Wrapper around Hugging Face pretrained ViT-MAE model.
     Only keeps the decoder for reconstruction during MAE training.
     """
-    def __init__(self, model_str: str = "facebook/vit-mae-base"):
+    def __init__(self, model_str: str = "facebook/vit-mae-base", pretrained = True):
         super().__init__() # call before assigning submodules
-        model = ViTMAEForPreTraining.from_pretrained(model_str)
+        if pretrained:
+            model = ViTMAEForPreTraining.from_pretrained(model_str)
+        else:
+            model = ViTMAEModel(ViTMAEConfig())
         self.decoder = model.decoder 
 
     def forward(self, x, ids_restore):

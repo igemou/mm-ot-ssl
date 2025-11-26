@@ -1,34 +1,22 @@
-####
-# This code was directly repurposed from 
-# https://github.com/facebookresearch/mae
-####
-
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
-# --------------------------------------------------------
-# References:
-# DeiT: https://github.com/facebookresearch/deit
-# BEiT: https://github.com/microsoft/unilm/tree/master/beit
-# --------------------------------------------------------
-
 import builtins
 import datetime
 import os
 import time
-from collections import defaultdict, deque
+from collections import defaultdict, deque, ChainMap
 from pathlib import Path
 
 import torch
 import torch.distributed as dist
-
-from utils.metrics import cosine_similarity
+import torch.nn.functional as F
 
 
 class SmoothedValue(object):
-    """Track a series of values and provide access to smoothed values over a
+    """
+    ####
+    # This code was directly repurposed from 
+    # https://github.com/facebookresearch/mae
+    ####
+    Track a series of values and provide access to smoothed values over a
     window or the global series average.
     """
 
@@ -88,73 +76,82 @@ class SmoothedValue(object):
             max=self.max,
             value=self.value)
 
+def ddp_cos_sim(z_img, z_txt, device, order = 2, eps = 1e-12):
+    #get the total number of images and texts
+    # as well as the img emb normalization denom
+    #allows us to use 1 less an allreduce
+    count_denom = torch.cat((
+        torch.tensor([[len(z_img), len(z_txt)]]),
+        z_img.pow(order).sum(dim=0, keepdim = True) #1, emb_sz
+    ), dim=1).to('cuda')
+    dist.barrier(device_ids=[device])
+    dist.all_reduce(count_denom)
+    num_imgs, num_txts = int(count_denom[0,0].item()), int(count_denom[0,1].item())
+    
+    #manually normalize over the last dimension by gathering the normalization factor 
+    #for all elts in the last dim, divide by max(eps, sum(x^ord)^(1/ord))
+    img_denom = count_denom[:, 2:]
+    img_denom = img_denom.pow(1.0 / float(order)).clamp(min=eps)
 
-class MetricLogger(object):
-    def __init__(self, delimiter="\t"):
-        self.meters = defaultdict(SmoothedValue)
-        self.delimiter = delimiter
+    #normalize
+    z_img = z_img / img_denom
 
-    def update(self, **kwargs):
-        for k, v in kwargs.items():
-            if v is None:
-                continue
-            if isinstance(v, torch.Tensor):
-                v = v.item()
-            assert isinstance(v, (float, int))
-            self.meters[k].update(v)
+    #gather all text embs
+    all_txt = torch.zeros((num_txts, ) + z_txt.shape[1:], dtype=z_txt.dtype, device='cuda')
+    dist.all_gather_into_tensor(all_txt, z_txt)
+    all_txt = all_txt.to(device)
+    all_txt = F.normalize(all_txt, dim=-1)
+    
+    #do device_img <-> all_txt similarity
+    partial_sim = z_img @ all_txt.t() #device_img, all_txt
 
-    def __getattr__(self, attr):
-        if attr in self.meters:
-            return self.meters[attr]
-        if attr in self.__dict__:
-            return self.__dict__[attr]
-        raise AttributeError("'{}' object has no attribute '{}'".format(
-            type(self).__name__, attr))
+    #gather all similarities
+    all_sim = torch.zeros((num_imgs, num_txts), dtype=partial_sim.dtype, device='cuda')
+    dist.all_gather_into_tensor(all_sim, partial_sim) #all_img, all_txt
 
-    def __str__(self):
-        loss_str = []
-        for name, meter in self.meters.items():
-            loss_str.append(
-                "{}: {}".format(name, str(meter))
-            )
-        return self.delimiter.join(loss_str)
+    all_sim = all_sim.to(device)
 
-    def synchronize_between_processes(self):
-        for meter in self.meters.values():
-            meter.synchronize_between_processes()
+    return all_sim
 
-    def add_meter(self, name, meter):
-        self.meters[name] = meter
 
-# Retrieval Accuracy (Image→Text and Text→Image)
-def retrieval_accuracy(z_img, z_txt, device, topk=(1, 5)):
+# Retrieval Accuracy (Image→Text)
+def i2t_retrieval_accuracy(sim, topk=(1, 5)):
     """
     Computes retrieval accuracy for image→text and text→image directions.
     """
-    sim = cosine_similarity(z_img, z_txt)
-    labels = torch.arange(z_img.size(0), device=device)
+    labels = torch.arange(sim.size(0), device=sim.device)
     results = {}
-    for k in topk:
-        results[f"i2t@{k}"] = SmoothedValue()
-        results[f"t2i@{k}"] = SmoothedValue()
-
 
     # Image → Text retrieval
     rank_i = sim.argsort(dim=-1, descending=True)
     for k in topk:
-        correct_i = (rank_i[:, :k] == labels.unsqueeze(1)).any(dim=1).float()
-        results[f"i2t@{k}"].update(correct_i.sum(), n=len(z_img))
+        correct_i = (rank_i[:, :k] == labels.unsqueeze(1)).any(dim=1).float().mean()
+        results[f"i2t@{k}"] = correct_i.item()
+
+    return results
+
+# Retrieval Accuracy (Text→Image)
+def t2i_retrieval_accuracy(sim, topk=(1, 5)):
+    """
+    Computes retrieval accuracy for image→text and text→image directions.
+    """
+    labels = torch.arange(sim.size(0), device=sim.device)
+    results = {}
 
     # Text → Image retrieval
     rank_t = sim.t().argsort(dim=-1, descending=True)
     for k in topk:
-        correct_t = (rank_t[:, :k] == labels.unsqueeze(1)).any(dim=1).float()
-        results[f"t2i@{k}"].update(correct_t.sum(), n=len(z_img))
+        correct_t = (rank_t[:, :k] == labels.unsqueeze(1)).any(dim=1).float().mean()
+        results[f"t2i@{k}"] = correct_t.item()
 
+    return results
 
-    for _, meter in results.items():
-        meter.synchronize_between_processes(device_ids=[device])
+def gather_dicts(device_dict):
+    #theres a funny way to do this by using a sparse tensor and all gathering it across ranks
+    #where the ith value in the sparse tensor is the topi retrieval value
+    gathered_dicts = [None for _ in range(dist.get_world_size())]
+    dist.all_gather_object(gathered_dicts, device_dict)
 
-    avg = {k: meter.global_avg for k, meter in results.items()}
+    ret = dict(ChainMap(*gathered_dicts))
 
-    return avg
+    return ret

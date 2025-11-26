@@ -1,13 +1,15 @@
 import os
 import argparse
 import builtins
+from collections import ChainMap
+from tqdm import trange, tqdm
+
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
 from torch import optim
+import torch.nn.functional as F
 import torch.distributed as dist 
 from torch.nn.parallel import DistributedDataParallel as DDP
-
-from tqdm import trange, tqdm
 
 from models.mm_model_ddp import DDPMultiModalModel
 from data import FlickrMultiModalDataset, COCOMultiModalDataset
@@ -19,7 +21,8 @@ from utils.losses import (
     mlm_loss,
     MAE_loss,
 )
-from utils.ddpmetric import SmoothedValue, retrieval_accuracy
+from utils.metrics import retrieval_accuracy
+from utils.ddpmetric import SmoothedValue, ddp_cos_sim, i2t_retrieval_accuracy, t2i_retrieval_accuracy, gather_dicts
 
 def print(*args, **kwargs):
     builtins.print(f"[rank {dist.get_rank()}]", *args, **kwargs)
@@ -85,6 +88,7 @@ class Trainer:
                 paired_fraction=self.args.paired_fraction,
                 train=True,
             )
+            
             sampler = DistributedSampler(dataset) if ddp else None
 
             if len(dataset) == 0:
@@ -100,7 +104,7 @@ class Trainer:
                 sampler=sampler,
             )
 
-            self.train_loaders[mode] = (loader, sampler)
+            self.train_loaders[mode] = loader
             self.iters[mode] = iter(loader)
             self.samplers[mode] = sampler
 
@@ -109,10 +113,12 @@ class Trainer:
 
         # Validation split
         dataset = FlickrMultiModalDataset(split="paired", paired_fraction=0.1, train=False),
+        self.val_sampler = DistributedSampler(dataset, shuffle=False) if ddp else None
         self.val_loader = DataLoader(dataset,
-                                     batch_size=self.args.batch_size,
-                                     shuffle=False,
-                                     num_workers=4)
+                                      batch_size=self.args.batch_size,
+                                      shuffle=False,
+                                      num_workers=4,
+                                      sampler=self.val_sampler)
 
         print("Flickr30k loaded splits:", list(self.train_loaders.keys()))
 
@@ -175,6 +181,8 @@ class Trainer:
 
     def train(self):
         print(f"Starting pretraining for {self.args.epochs} epochs on {self.device}")
+        with open(os.path.join(self.args.desc_dir, "results.txt"), "a") as f:
+            f.write(f"\n{self.args.desc}\n")
         λ = {
             "clip": self.args.lambda_clip,
             "ot": self.args.lambda_ot,
@@ -188,21 +196,24 @@ class Trainer:
 
             for mode in self.samplers: self.samplers[mode].set_epoch(epoch)
 
-            metrics = {k: SmoothedValue() for k in λ}
+            metrics = {k: SmoothedValue() for k, w in λ.items() if w > 0}
         
             pbar = trange(steps, desc=f"Epoch {epoch}") if (dist.get_rank() == 0) else range(steps) 
             for _ in pbar:
                 self.opt.zero_grad()
 
                 paired_batch = self._next("paired")
-                unpaired_batch = self._next("unpaired")
-                text_batch = self._next("text_only")
-                img_batch = self._next("image_only")
+                unpaired_batch = self._next("unpaired") if "unpaired" in self.iters else None
+                text_batch = self._next("text_only") if "text_only" in self.iters else None
+                img_batch = self._next("image_only") if "image_only" in self.iters else None
                 ot = "sinkhorn"
                 if self.args.use_anchored_ot: ot = "anchored"
                 elif self.args.use_gw_ot: ot = "gw"
-                _, total_loss, loss_dict = self.model(paired_batch, unpaired_batch, text_batch, img_batch, ot_loss=ot, λ=λ)
+                _, total_loss, loss_dict = self.model(paired_batch, unpaired_batch, text_batch, img_batch, ot_loss=ot, λ=λ, alpha_anchor=self.args.alpha_anchor)
                 if (dist.get_rank() == 0): pbar.set_postfix(loss_dict)
+
+                if len(set(metrics.keys()) - set(loss_dict.keys())) > 0:
+                    print(f"WARNING: Calculated losses missing: {set(metrics.keys()) - set(loss_dict.keys())}")
 
                 for loss_name, loss_val in loss_dict.items():
                     metrics[loss_name].update(loss_val)
@@ -220,36 +231,30 @@ class Trainer:
             if (epoch % self.args.eval_every == 0):
                 score, metrics = self.evaluate(epoch) 
 
-                if (dist.get_rank() == 0):
-                    # Save best model
-                    if score > self.best_score:
-                        self.best_score = score
-                        self.early_stop_counter = 0
+                # Save best model
+                if score > self.best_score:
+                    self.best_score = score
+                    self.early_stop_counter = 0
+                    if (dist.get_rank() == 0):
                         best_path = os.path.join(self.args.save_dir, "best.pt")
                         torch.save(self.model.state_dict(), best_path)
-                        print(f"New best model saved at epoch {epoch} (score {score:.4f})")
+                        print(f"New best model saved at epoch {epoch} (score {score:.4f})\n")
 
-                        with open(os.path.join(self.args.desc_dir, "results.txt"), "w") as f:
-                            f.write(args.desc)
-                            f.write(f"Epoch: {epoch}, metrics: {metrics}")
+                        with open(os.path.join(self.args.desc_dir, "results.txt"), "a") as f:
+                            f.write(f"\tEpoch: {epoch}, metrics: {metrics}\n")
 
-                    else:
-                        self.early_stop_counter += 1
-                        print(f"No improvement. Early stop counter = {self.early_stop_counter}")
+                else:
+                    self.early_stop_counter += 1
+                    if (dist.get_rank() == 0): print(f"No improvement. Early stop counter: {self.early_stop_counter}\n")
 
-                        if self.early_stop_counter >= self.args.patience:
-                            print("Early stopping triggered!")
-                            cleanup()
-                            return
+                    if self.early_stop_counter >= self.args.patience:
+                        if (dist.get_rank() == 0): print("Early stopping triggered!\n")
+                        return
             
-            dist.barrier(device_ids = [self.device])
-
-        cleanup()
-
     def evaluate(self, epoch):
         self.model.eval()
         imgs, txts = [], []
-        with torch.no_grad():
+        with torch.inference_mode():
             val_loader = tqdm(self.val_loader, desc=f"Val Epoch {epoch}") if (dist.get_rank() == 0) else self.val_loader 
             for batch in val_loader:
                 z_img = self.model.module.image_embed(batch["image"].to(self.device))
@@ -259,20 +264,36 @@ class Trainer:
                 )
                 imgs.append(z_img)
                 txts.append(z_txt)
+        
+        z_txt = torch.cat(txts).to(self.device)
+        z_img = torch.cat(imgs).to(self.device)
+        
+        #get img <-> txt similarity metric across all devices 
+        #takes advantage of multi gpu
+        all_sim = ddp_cos_sim(z_img, z_txt, self.device)
 
-        z_img = torch.cat(imgs)
-        z_txt = torch.cat(txts)
-        metrics = retrieval_accuracy(z_img, z_txt, self.device)
+        #divide the work of retrieval calculation
+        ops = [i2t_retrieval_accuracy, t2i_retrieval_accuracy]
+        rank_ops = [op for ind, op in enumerate(ops) if ((ind % dist.get_world_size()) - dist.get_rank() == 0)]
+        metrics = dict(ChainMap(*[op(all_sim) for op in rank_ops]))
+
+        #make sure all devices have finished calculations
+        dist.barrier(device_ids=[self.device])
+        
+        #gather metrics across all devices
+        metrics = gather_dicts(metrics)
+
         if (dist.get_rank() == 0):
-            print(f"\n[Epoch {epoch}] Validation retrieval: {metrics}\n")
+            print(f"[Epoch {epoch}] Validation retrieval: {metrics}")
 
+        #this will be synced by the gather_dicts above
         score = 0.5 * (metrics["i2t@1"] + metrics["t2i@1"])
         return score, metrics
 
 
 if __name__ == "__main__":
     torch.autograd.set_detect_anomaly(True)
-    parser = argparse.ArgumentParser(description="Anchored/GW MultiModal SSL Pretraining (Flickr30k)")
+    parser = argparse.ArgumentParser(description="Anchored/GW MultiModal SSL DDP Pretraining")
 
     # Model
     parser.add_argument("--vision_name", type=str, default="vit_base_patch16_224")
@@ -309,3 +330,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     trainer = Trainer(args)
     trainer.train()
+
+    #make sure everything is done
+    dist.barrier(device_ids = [trainer.device])
+    
+    #cleanup ddp
+    cleanup()

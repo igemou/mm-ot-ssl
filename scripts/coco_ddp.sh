@@ -4,7 +4,7 @@
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1 --cpus-per-task=4
 #SBATCH --output=logs/coco_ssl_ddp_%j.out
-#SBATCH -t 02:00:00
+#SBATCH -t 30:00:00
 #SBATCH --mem=50g
 
 export MASTER_ADDR=$(scontrol show hostname $SLURM_NODELIST | head -n 1) 
@@ -21,44 +21,77 @@ conda activate anchor
 cd /users/bjoo2/code/anchor/
 
 # Run training
-# python train.py \
-#   --dataset coco\
-#   --epochs 30 \
-#   --paired_fraction 0.2 \
-#   --lambda_clip 1.0 \
-#   --lambda_ot 0.5 \
-#   --lambda_mlm 1.0 \
-#   --lambda_mae 1.0 \
-#   --save_dir /users/bjoo2/scratch/anchor/checkpoints/coco_plain_ot
+echo "Running Plain OT on COCO"
+srun torchrun \
+  --nnodes=2 \
+  --nproc_per_node=1 \
+  --rdzv_id=100 \
+  --rdzv_backend=c10d \
+  --rdzv_endpoint=$MASTER_ADDR:29400 \
+  train_ddp.py \
+  --dataset coco\
+  --epochs 30 \
+  --batch_size 16 \
+  --lr 1e-4 \
+  --eval_every 1 \
+  --paired_fraction 0.2 \
+  --lambda_clip 1.0 --lambda_ot 0.5 --lambda_mlm 1.0  --lambda_mae 1.0 \
+  --save_dir /users/bjoo2/scratch/anchor/checkpoints/coco_plain_ot\
+  --desc_dir /users/bjoo2/scratch/anchor/\
+  --desc plain_ot
 
-# python train.py \
-#   --dataset coco\
-#     --epochs 30 \
-#     --batch_size 16 \
-#     --lr 1e-4 \
-#     --eval_every 1 \
-#     --save_dir /users/bjoo2/scratch/anchor/checkpoints/coco_anchored_ot \
-#     --paired_fraction 0.2 \
-#     --lambda_clip 1.0 \
-#     --lambda_ot 0.2 \
-#     --lambda_mlm 1.0 \
-#     --lambda_mae 1.0 \
-#     --use_anchored_ot \
-#     --alpha_anchor 0.8
+echo "Running Anchor OT on COCO"
+srun torchrun \
+  --nnodes=2 \
+  --nproc_per_node=1 \
+  --rdzv_id=100 \
+  --rdzv_backend=c10d \
+  --rdzv_endpoint=$MASTER_ADDR:29400 \
+  train_ddp.py \
+    --dataset coco\
+    --epochs 30 \
+    --batch_size 16 \
+    --lr 1e-4 \
+    --eval_every 1 \
+    --paired_fraction 0.2 \
+    --lambda_clip 1.0 --lambda_ot 0.2 --lambda_mlm 1.0 --lambda_mae 1.0 \
+    --use_anchored_ot \
+    --alpha_anchor 0.8\
+    --save_dir /users/bjoo2/scratch/anchor/checkpoints/coco_anchored_ot \
+    --desc_dir /users/bjoo2/scratch/anchor/\
+    --desc anchored_ot
 
-# python train.py \
-#   --dataset coco\
-#   --epochs 30 --batch_size 16 --lr 1e-4 --eval_every 1 \
-#   --paired_fraction 0.2 \
-#   --lambda_clip 1.0 --lambda_ot 0.0 --lambda_mlm 1.0 --lambda_mae 1.0 \
-#   --save_dir /users/bjoo2/scratch/anchor/checkpoints/coco_clip_20p
+echo "Running CLIP Alignment on COCO with 20% Paired"
+srun torchrun \
+  --nnodes=2 \
+  --nproc_per_node=1 \
+  --rdzv_id=100 \
+  --rdzv_backend=c10d \
+  --rdzv_endpoint=$MASTER_ADDR:29400 \
+  train_ddp.py \
+  --dataset coco\
+  --epochs 30 --batch_size 16 --lr 1e-4 --eval_every 1 \
+  --paired_fraction 0.2 \
+  --lambda_clip 1.0 --lambda_ot 0.0 --lambda_mlm 1.0 --lambda_mae 1.0 \
+  --save_dir /users/bjoo2/scratch/anchor/checkpoints/coco_clip_20p \
+  --desc_dir /users/bjoo2/scratch/anchor/\
+  --desc clip_only_20p
 
-# python train.py \
-#   --dataset coco\
-#   --epochs 30 --batch_size 16 --lr 1e-4 --eval_every 1 \
-#   --paired_fraction 1.0 \
-#   --lambda_clip 1.0 --lambda_ot 0.0 --lambda_mlm 1.0 --lambda_mae 1.0 \
-#   --save_dir /users/bjoo2/scratch/anchor/checkpoints/coco_clip_100p
+echo "Running CLIP Alignment on COCO with 100% Paired"
+srun torchrun \
+  --nnodes=2 \
+  --nproc_per_node=1 \
+  --rdzv_id=100 \
+  --rdzv_backend=c10d \
+  --rdzv_endpoint=$MASTER_ADDR:29400 \
+  train_ddp.py \
+  --dataset coco\
+  --epochs 30 --batch_size 16 --lr 1e-4 --eval_every 1 \
+  --paired_fraction 1.0 \
+  --lambda_clip 1.0 --lambda_ot 0.0 --lambda_mlm 1.0 --lambda_mae 1.0 \
+  --save_dir /users/bjoo2/scratch/anchor/checkpoints/coco_clip_100p \
+  --desc_dir /users/bjoo2/scratch/anchor/\
+  --desc clip_only_100p
 
 echo "Running GW OT on COCO"
 srun torchrun \
