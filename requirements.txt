@@ -11,3 +11,4 @@ matplotlib
 pot
 sklearn
 umap-learn
+optuna
