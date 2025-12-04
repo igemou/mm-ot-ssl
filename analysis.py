@@ -27,7 +27,7 @@ ckpt_path = args.checkpoint
 ckpt_name = os.path.basename(ckpt_path).replace(".pt", "")          # epoch_30
 exp_name = os.path.basename(os.path.dirname(ckpt_path))             # flickr_plain_ot
 
-OUT_DIR = f"analysis_outputs/{exp_name}_{ckpt_name}"
+OUT_DIR = f"results/analysis_outputs/{exp_name}_{ckpt_name}"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 print(f"[INFO] Saving analysis results to: {OUT_DIR}")
