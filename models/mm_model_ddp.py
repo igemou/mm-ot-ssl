@@ -1,6 +1,7 @@
 # mm_model.py
 import torch
 import torch.nn as nn
+from torch.distributed.fsdp import fully_shard, FSDPModule
 from models.vision_encoder import VisionEncoder
 from models.text_encoder import TextEncoder
 from models.projector import MLPProjector
@@ -54,6 +55,12 @@ class DDPMultiModalModel(nn.Module):
 
         self.mae_loss_fn = MAE_loss()
         self.mlm_loss_fn = mlm_loss(model_name=text_name)
+
+    def fully_shard(self):
+        for sub_model in [self.vision_encoder, self.text_encoder, self.vision_proj, self.text_proj, self.mae_decoder]:
+            for layer in sub_model.modules():
+                fully_shard(layer)
+            fully_shard(sub_model)
 
     @torch.no_grad()
     def image_embed(self, images: torch.Tensor):

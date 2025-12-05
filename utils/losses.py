@@ -139,19 +139,26 @@ def gromov_wasserstein_loss(x, y, eps=1e-3, loss_fun="square_loss"):
     GW aligns based on relational geometry
     """
     # Convert to numpy (POT only supports numpy)
-    X = x.detach().cpu().numpy()
-    Y = y.detach().cpu().numpy()
+    # X = x.detach().cpu().numpy()
+    # Y = y.detach().cpu().numpy()
+    X, Y = x,y
 
     # Pairwise distance matrices
     Cx = ot.utils.dist(X, X)
     Cy = ot.utils.dist(Y, Y)
 
     # Uniform distributions
-    p = ot.unif(len(X))
-    q = ot.unif(len(Y))
+    p = ot.unif(len(X), type_as=Cx)
+    q = ot.unif(len(Y), type_as=Cy)
+
+    # print(f"GWOT Types: Cx: {type(Cx)}, p: {type(p)}")
 
     # Compute GW distance
     gw, _ = ot.gromov.gromov_wasserstein2(
         Cx, Cy, p, q, loss_fun=loss_fun, epsilon=eps, verbose=False, log=True
     )
-    return torch.tensor(gw, device=x.device, dtype=torch.float32)
+
+    # print(f"Computed GW type: {type(gw)} on device: {gw.device}")
+
+    return gw
+    # return torch.tensor(gw, device=x.device, dtype=torch.float32)

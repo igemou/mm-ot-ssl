@@ -78,29 +78,18 @@ class SmoothedValue(object):
 
 def ddp_cos_sim(z_img, z_txt, device, order = 2, eps = 1e-12):
     #get the total number of images and texts
-    # as well as the img emb normalization denom
-    #allows us to use 1 less an allreduce
-    count_denom = torch.cat((
-        torch.tensor([[len(z_img), len(z_txt)]]),
-        z_img.pow(order).sum(dim=0, keepdim = True) #1, emb_sz
-    ), dim=1).to('cuda')
+    count = torch.tensor([len(z_img), len(z_txt)], device=z_img.device, dtype=torch.int).to('cuda')
     dist.barrier(device_ids=[device])
-    dist.all_reduce(count_denom)
-    num_imgs, num_txts = int(count_denom[0,0].item()), int(count_denom[0,1].item())
-    
-    #manually normalize over the last dimension by gathering the normalization factor 
-    #for all elts in the last dim, divide by max(eps, sum(x^ord)^(1/ord))
-    img_denom = count_denom[:, 2:]
-    img_denom = img_denom.pow(1.0 / float(order)).clamp(min=eps)
+    dist.all_reduce(count)
+    num_imgs, num_txts = count.tolist()
 
-    #normalize
-    z_img = z_img / img_denom
+    z_img = F.normalize(z_img, dim=-1)
+    z_txt = F.normalize(z_txt, dim=-1)
 
     #gather all text embs
     all_txt = torch.zeros((num_txts, ) + z_txt.shape[1:], dtype=z_txt.dtype, device='cuda')
     dist.all_gather_into_tensor(all_txt, z_txt)
     all_txt = all_txt.to(device)
-    all_txt = F.normalize(all_txt, dim=-1)
     
     #do device_img <-> all_txt similarity
     partial_sim = z_img @ all_txt.t() #device_img, all_txt
@@ -112,6 +101,52 @@ def ddp_cos_sim(z_img, z_txt, device, order = 2, eps = 1e-12):
     all_sim = all_sim.to(device)
 
     return all_sim
+
+def _ddp_cos_sim(z_img, z_txt, device, order = 2, eps = 1e-12):
+    raw = []
+    normed = []
+
+    print("getting stats")
+    count = torch.tensor([len(z_img), len(z_txt)], device=z_img.device, dtype=torch.int).to('cuda')
+    dist.barrier(device_ids=[device])
+    dist.all_reduce(count)
+    num_imgs, num_txts = count.tolist()
+    print(f"Note: Gathered num imgs: {num_imgs}, local num imgs: {len(z_img)}, Gathered num txt: {num_txts}, local num imgs: {len(z_txt)}")
+
+    print("gathering all img zs")
+    all_img = torch.zeros((num_imgs, ) + z_img.shape[1:], dtype=z_img.dtype, device='cuda')
+    dist.all_gather_into_tensor(all_img, z_img)
+    raw.append(all_img)
+    
+    print("gathering all txt zs")
+    all_txt = torch.zeros((num_txts, ) + z_txt.shape[1:], dtype=z_txt.dtype, device='cuda')
+    dist.all_gather_into_tensor(all_txt, z_txt)
+    raw.append(all_txt)
+
+    z_img = F.normalize(z_img, dim=-1)
+    z_txt = F.normalize(z_txt, dim=-1)
+
+    print("gathering normed img zs")
+    all_img = torch.zeros((num_imgs, ) + z_img.shape[1:], dtype=z_img.dtype, device='cuda')
+    dist.all_gather_into_tensor(all_img, z_img)
+    normed.append(all_img)
+
+    print("gathering normed txt zs")
+    all_txt = torch.zeros((num_txts, ) + z_txt.shape[1:], dtype=z_txt.dtype, device='cuda')
+    dist.all_gather_into_tensor(all_txt, z_txt)
+    normed.append(all_txt)
+    
+    #do device_img <-> all_txt similarity
+    partial_sim = z_img @ all_txt.t() #device_img, all_txt
+
+    #gather all similarities
+    print("gathering sims")
+    all_sim = torch.zeros((num_imgs, num_txts), dtype=partial_sim.dtype, device='cuda')
+    dist.all_gather_into_tensor(all_sim, partial_sim) #all_img, all_txt
+
+    all_sim = all_sim.to(device)
+
+    return all_sim, raw, normed
 
 
 # Retrieval Accuracy (Image→Text)

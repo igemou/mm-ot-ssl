@@ -21,23 +21,25 @@ from utils.losses import (
     mlm_loss,
     MAE_loss,
 )
-from utils.metrics import retrieval_accuracy
-from utils.ddpmetric import SmoothedValue, ddp_cos_sim, i2t_retrieval_accuracy, t2i_retrieval_accuracy, gather_dicts
+from utils.metrics import retrieval_accuracy, cosine_similarity
+from utils.ddpmetric import SmoothedValue, ddp_cos_sim, _ddp_cos_sim, i2t_retrieval_accuracy, t2i_retrieval_accuracy, gather_dicts
 
 def print(*args, **kwargs):
     builtins.print(f"[rank {dist.get_rank()}]", *args, **kwargs)
 
-def setup(model):
-    torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
-    acc = torch.accelerator.current_accelerator()
-    backend = torch.distributed.get_default_backend_for_device(acc)
-    dist.init_process_group(backend)
-    rank = dist.get_rank()
-    print(f"Start running DDP on rank {rank}.")
-    print(f"Num Avail Devices: {torch.accelerator.device_count()}")
+def setup(model, device_id):
+    if device_id is None:
+        torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
+        acc = torch.accelerator.current_accelerator()
+        backend = torch.distributed.get_default_backend_for_device(acc)
+        dist.init_process_group(backend=backend)
+        rank = dist.get_rank()
+        print(f"Start running DDP on rank {rank}.")
+        print(f"Num Avail Devices: {torch.accelerator.device_count()}")
 
-    # create model and move it to GPU with id rank
-    device_id = rank % torch.accelerator.device_count()
+        device_id = rank % torch.accelerator.device_count()
+
+    # move model to GPU with id rank
     model.device = device_id
     model = model.to(device_id)
     model.mlm_loss_fn = model.mlm_loss_fn.to(device_id)
@@ -51,14 +53,16 @@ def cleanup():
 class Trainer:
     """Unified trainer for Anchored / GW Multimodal SSL pretraining."""
 
-    def __init__(self, args):
+    def __init__(self, args, device = None):
         self.args = args
+        if args.debug: self.args.epochs = 1
+
         model = DDPMultiModalModel(
             vision_name=args.vision_name,
             text_name=args.text_name,
             shared_dim=args.shared_dim,
         )
-        self.model, self.device = setup(model)
+        self.model, self.device = setup(model, device)
         print(f"Model Setup Done")
 
         self.opt = torch.optim.AdamW(self.model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -161,9 +165,9 @@ class Trainer:
             raise RuntimeError("ERROR: 'paired' dataset cannot be empty.")
 
         # Validation split
-        val_dataset = COCOMultiModalDataset(split="paired", paired_fraction=0.1, train=False)
-        self.val_sampler = DistributedSampler(val_dataset, shuffle=False) if ddp else None
-        self.val_loader = DataLoader(val_dataset,
+        dataset = COCOMultiModalDataset(split="paired", paired_fraction=0.1, train=False)
+        self.val_sampler = DistributedSampler(dataset, shuffle=False) if ddp else None
+        self.val_loader = DataLoader(dataset,
                                       batch_size=self.args.batch_size,
                                       shuffle=False,
                                       num_workers=4,
@@ -179,10 +183,11 @@ class Trainer:
             self.iters[name] = iter(self.train_loaders[name])
             return next(self.iters[name])
 
-    def train(self):
-        print(f"Starting pretraining for {self.args.epochs} epochs on {self.device}")
-        with open(os.path.join(self.args.desc_dir, "results.txt"), "a") as f:
-            f.write(f"\n{self.args.desc}\n")
+    def train(self, trial = None):
+        print(f"Starting pretraining for {self.args.epochs} epochs on {self.device}\n")
+        if (dist.get_rank() == 0) and self.args.write:
+            with open(os.path.join(self.args.desc_dir, "results.txt"), "a") as f:
+                f.write(f"\n{self.args.desc}\n")
         λ = {
             "clip": self.args.lambda_clip,
             "ot": self.args.lambda_ot,
@@ -192,13 +197,13 @@ class Trainer:
 
         for epoch in range(1, self.args.epochs + 1):
             self.model.train()
-            steps = len(self.train_loaders["paired"])
+            steps = len(self.train_loaders["paired"]) if not self.args.debug else 1
 
             for mode in self.samplers: self.samplers[mode].set_epoch(epoch)
 
             metrics = {k: SmoothedValue() for k, w in λ.items() if w > 0}
         
-            pbar = trange(steps, desc=f"Epoch {epoch}") if (dist.get_rank() == 0) else range(steps) 
+            pbar = trange(steps, desc=f"Train Epoch {epoch}") if (dist.get_rank() == 0) else range(steps) 
             for _ in pbar:
                 self.opt.zero_grad()
 
@@ -226,10 +231,11 @@ class Trainer:
 
             avg = {k: meter.global_avg for k, meter in metrics.items()}
 
-            if (dist.get_rank() == 0): print(f"Epoch {epoch} | Losses: {avg}")
+            if (dist.get_rank() == 0): print(f"Train Epoch {epoch} | Avg Losses: {avg}")
 
             if (epoch % self.args.eval_every == 0):
                 score, metrics = self.evaluate(epoch) 
+                if trial is not None: trial.report(score, step=epoch)
 
                 # Save best model
                 if score > self.best_score:
@@ -240,8 +246,9 @@ class Trainer:
                         torch.save(self.model.state_dict(), best_path)
                         print(f"New best model saved at epoch {epoch} (score {score:.4f})\n")
 
-                        with open(os.path.join(self.args.desc_dir, "results.txt"), "a") as f:
-                            f.write(f"\tEpoch: {epoch}, metrics: {metrics}\n")
+                        if self.args.write:
+                            with open(os.path.join(self.args.desc_dir, "results.txt"), "a") as f:
+                                f.write(f"\tEpoch: {epoch}, metrics: {metrics}\n")
 
                 else:
                     self.early_stop_counter += 1
@@ -250,13 +257,16 @@ class Trainer:
                     if self.early_stop_counter >= self.args.patience:
                         if (dist.get_rank() == 0): print("Early stopping triggered!\n")
                         return
+                
+                if trial is not None and trial.should_prune():
+                    raise optuna.TrialPruned()
             
     def evaluate(self, epoch):
         self.model.eval()
         imgs, txts = [], []
         with torch.inference_mode():
-            val_loader = tqdm(self.val_loader, desc=f"Val Epoch {epoch}") if (dist.get_rank() == 0) else self.val_loader 
-            for batch in val_loader:
+            #val_loader = tqdm(self.val_loader, desc=f"Val Epoch {epoch}") if (dist.get_rank() == 0) else self.val_loader 
+            for batch in self.val_loader:
                 z_img = self.model.module.image_embed(batch["image"].to(self.device))
                 z_txt = self.model.module.text_embed(
                     batch["input_ids"].to(self.device),
@@ -264,13 +274,37 @@ class Trainer:
                 )
                 imgs.append(z_img)
                 txts.append(z_txt)
-        
-        z_txt = torch.cat(txts).to(self.device)
+
         z_img = torch.cat(imgs).to(self.device)
+        z_txt = torch.cat(txts).to(self.device)
         
         #get img <-> txt similarity metric across all devices 
         #takes advantage of multi gpu
-        all_sim = ddp_cos_sim(z_img, z_txt, self.device)
+        
+        if self.args.debug:
+            all_sim, raw, normed = _ddp_cos_sim(z_img, z_txt, self.device)
+
+            if dist.get_rank() == 0:
+                for sz, ddp_z, ver in zip(raw, normed, ["Img", "Txt"]):
+                    sz = F.normalize(sz, dim=-1)
+                    try:
+                        torch.testing.assert_close(ddp_z, sz)
+                        print(f"{ver} Normalized correctly")
+                    except Exception as e:
+                        print(f"Problem Normalizing {ver}: {e}")
+            
+                ssim = cosine_similarity(*raw)
+                try:
+                    torch.testing.assert_close(all_sim, ssim)
+                    print("Similarity calculated and gathered correctly")
+                except Exception as e:
+                    print(f"Problem w Similarity calculation:{e}")
+            
+            print(f"Waiting for sim calc")
+        
+        else: all_sim = ddp_cos_sim(z_img, z_txt, self.device)
+
+        dist.barrier(device_ids=[self.device])
 
         #divide the work of retrieval calculation
         ops = [i2t_retrieval_accuracy, t2i_retrieval_accuracy]
@@ -292,7 +326,6 @@ class Trainer:
 
 
 if __name__ == "__main__":
-    torch.autograd.set_detect_anomaly(True)
     parser = argparse.ArgumentParser(description="Anchored/GW MultiModal SSL DDP Pretraining")
 
     # Model
@@ -310,6 +343,9 @@ if __name__ == "__main__":
     parser.add_argument("--paired_fraction", type=float, default=0.2)
     parser.add_argument("--eval_every", type=int, default=1)
     parser.add_argument("--save_dir", type=str, default="checkpoints_flickr")
+    parser.add_argument("--desc_dir", type=str)
+    parser.add_argument("--desc", type=str)
+    parser.add_argument("--write", type=bool, default=True)
 
     # Loss weights
     parser.add_argument("--lambda_clip", type=float, default=1.0)
@@ -322,16 +358,21 @@ if __name__ == "__main__":
     parser.add_argument("--alpha_anchor", type=float, default=0.1)
     parser.add_argument("--use_gw_ot", action="store_true")
 
-     # Early stopping
+    # Early stopping
     parser.add_argument("--patience", type=int, default=5)
-    parser.add_argument("--desc_dir", type=str)
-    parser.add_argument("--desc", type=str)
+
+    # debug
+    parser.add_argument("--debug", action="store_true")
 
     args = parser.parse_args()
     trainer = Trainer(args)
-    trainer.train()
+    try:
+        trainer.train()
+    except Exception as e:
+        print(f"Error encountered during training:{e}")
 
     #make sure everything is done
+    print("Training Done, Waiting for Clean Up")
     dist.barrier(device_ids = [trainer.device])
     
     #cleanup ddp
