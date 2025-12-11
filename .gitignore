@@ -13,3 +13,6 @@ lightning_logs/
 .env
 analysis_outputs
 qualitative_plots
+data/CT_Features
+data/clinical+genomic_split.csv
+data/CT_patientfiles.csv
