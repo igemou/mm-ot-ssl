@@ -162,3 +162,18 @@ def gromov_wasserstein_loss(x, y, eps=1e-3, loss_fun="square_loss"):
 
     return gw
     # return torch.tensor(gw, device=x.device, dtype=torch.float32)
+
+
+def masked_mse_loss(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """
+    Feature-level reconstruction loss.
+    pred, target: [B, D]
+    mask: [B, D] (bool or {0,1}), True = locations to include in loss.
+    """
+    if mask.dtype != torch.bool:
+        mask = mask.bool()
+    diff = (pred - target)[mask]
+    if diff.numel() == 0:
+        return torch.tensor(0.0, device=pred.device)
+    return (diff ** 2).mean()
+
