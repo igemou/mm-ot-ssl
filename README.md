@@ -1,1 +1,1 @@
-anchored-mmSSL
+mm-ot-ssl is a self-supervised multimodal learning framework for training joint representations from partially paired and fully unpaired data. It combines CLIP-style contrastive alignment, masked reconstruction (MLM and MAE), and Gromov–Wasserstein optimal transport to align modalities at both the instance and distribution level. The framework is modality-agnostic and works with raw inputs or precomputed features, and we evaluate it on standard image–text benchmarks (Flickr30k, MSCOCO) as well as a medical dataset (ccRCC) with CT and clinical–genomic features.
