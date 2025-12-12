@@ -6,8 +6,8 @@ mm-ot-ssl is a self-supervised multimodal learning framework for training joint 
 
 ### Setup
 ```bash
-git clone https://github.com/igemou/anchored-mmSSL.git
-cd anchored-mmSSL
+git clone https://github.com/igemou/mm-ot-ssl.git
+cd mm-ot-ssl
 pip install -r requirements.txt
 ```
 
