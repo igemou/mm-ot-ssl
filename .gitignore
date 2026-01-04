@@ -11,8 +11,7 @@ checkpoints/
 lightning_logs/
 .vscode/
 .env
-analysis_outputs
-qualitative_plots
 data/CT_Features
 data/clinical+genomic_split.csv
 data/CT_patientfiles.csv
+results
