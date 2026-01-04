@@ -73,7 +73,7 @@ def main(args):
     for ckpt in args.checkpoints:
         ckpt_name = os.path.basename(os.path.dirname(ckpt))
         print(f"\n---- Loading checkpoint: {ckpt_name} ----")
-        out_dir = f"qualitative_plots/{ckpt_name}"
+        out_dir = f"results/qualitative_plots/{ckpt_name}"
         os.makedirs(out_dir, exist_ok=True)
 
         model = MultiModalModel(
