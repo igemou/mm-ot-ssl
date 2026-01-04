@@ -225,7 +225,7 @@ def main(args):
         dataset = FlickrMultiModalDataset(
             split="paired",
             paired_fraction=args.paired_fraction,
-            train=False,  # uses your manual val split; keep as-is
+            train=(args.flickr_subset == "train"),  # uses your manual val split; keep as-is
         )
         loader = torch.utils.data.DataLoader(
             dataset,
@@ -312,7 +312,8 @@ if __name__ == "__main__":
     p.add_argument("--paired_fraction", type=float, default=0.1)
 
     p.add_argument("--ccrcc_root", type=str, default="data")
-    p.add_argument("--ccrcc_subset", choices=["train", "test"], default="test")
+    p.add_argument("--ccrcc_subset", choices=["train", "test"], default="train")
+    p.add_argument("--flickr_subset", choices=["train", "val"], default="train")
     p.add_argument("--ct_dim", type=int, default=512)
     p.add_argument("--clingen_dim", type=int, default=18)
     p.add_argument("--hidden_dim", type=int, default=512)
